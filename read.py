@@ -1,19 +1,2093 @@
+# """
+# 摸鱼阅读器 v6.0  —  章节滚动模式
+#   · 每章完整显示，鼠标滚轮在章内自由滚动
+#   · 点击文字区左侧 38% → 上一章
+#   · 点击文字区右侧 62% → 下一章
+#   · 底部 ◀ ▶ 按钮 / ← → 键 切换章节
+#   · S 键滚动到下一屏
+# 运行：python novel_reader.py
+# 打包：pip install pyinstaller
+#       pyinstaller --onefile --windowed --name 摸鱼阅读器 novel_reader.py
+# 屏幕取色需要 Pillow：pip install pillow
+# """
+
+# import tkinter as tk
+# from tkinter import ttk, filedialog, colorchooser, messagebox
+# import os, re, zipfile, sys, json
+# from html.parser import HTMLParser
+
+
+# # ══════════════════════════════════════════════════════════════
+# # HTML → 纯文本
+# # ══════════════════════════════════════════════════════════════
+# class _H2T(HTMLParser):
+#     SKIP  = {'script','style','head','meta','link'}
+#     BLOCK = {'p','div','br','h1','h2','h3','h4','h5',
+#              'h6','li','tr','td','th','section','article'}
+#     def __init__(self):
+#         super().__init__()
+#         self.out, self._s = [], 0
+#     def handle_starttag(self, tag, _):
+#         if tag in self.SKIP:  self._s += 1
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_endtag(self, tag):
+#         if tag in self.SKIP:  self._s = max(0, self._s - 1)
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_data(self, d):
+#         if not self._s: self.out.append(d)
+#     def text(self):
+#         return re.sub(r'\n{3,}', '\n\n', ''.join(self.out)).strip()
+
+# def html2text(s):
+#     p = _H2T()
+#     try: p.feed(s)
+#     except: pass
+#     return p.text()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # EPUB
+# # ══════════════════════════════════════════════════════════════
+# def read_epub(path):
+#     import xml.etree.ElementTree as ET
+#     title = os.path.splitext(os.path.basename(path))[0]
+#     body  = ''
+#     try:
+#         with zipfile.ZipFile(path) as z:
+#             ns = z.namelist()
+#             opf, odir = '', ''
+#             if 'META-INF/container.xml' in ns:
+#                 for el in ET.fromstring(z.read('META-INF/container.xml')).iter():
+#                     if el.tag.endswith('rootfile'):
+#                         opf  = el.get('full-path', '')
+#                         odir = opf.rsplit('/', 1)[0] if '/' in opf else ''
+#                         break
+#             items, spine = {}, []
+#             if opf and opf in ns:
+#                 root = ET.fromstring(z.read(opf))
+#                 for el in root.iter():
+#                     tag = el.tag.split('}')[-1]
+#                     if tag == 'item':
+#                         mid  = el.get('id','')
+#                         href = el.get('href','')
+#                         mt   = el.get('media-type','')
+#                         if href and ('html' in mt or href.endswith(('.html','.xhtml','.htm'))):
+#                             items[mid] = (odir+'/'+href).lstrip('/') if odir else href
+#                     elif tag == 'itemref':
+#                         r = el.get('idref','')
+#                         if r in items: spine.append(items[r])
+#                     elif tag == 'title' and el.text:
+#                         title = el.text
+#             if not spine:
+#                 spine = sorted(f for f in ns
+#                                if re.search(r'\.(html|htm|xhtml)$', f, re.I)
+#                                and 'toc' not in f.lower() and 'nav' not in f.lower())
+#             for href in spine:
+#                 if href in ns:
+#                     try: body += html2text(z.read(href).decode('utf-8','replace')) + '\n\n'
+#                     except: pass
+#     except Exception as e:
+#         body = f'[EPUB解析失败: {e}]'
+#     return title, body.strip()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 章节切割
+# # ══════════════════════════════════════════════════════════════
+# _CH = re.compile(
+#     r'^(第\s*[零一二三四五六七八九十百千万\d〇]+\s*[章节卷集回部篇][^\n]{0,40}'
+#     r'|Chapter\s*\d+[^\n]{0,40}'
+#     r'|CHAPTER\s*\d+[^\n]{0,40}'
+#     r'|【[^\n]{1,30}】)', re.I)
+
+# def split_chapters(text):
+#     """
+#     把全文按章节标题切割，返回 [{'title':str, 'body':str}]
+#     若无章节标题，整本作为一章。
+#     """
+#     boundaries = []   # (char_pos, title)
+#     for m in re.finditer(r'^.+$', text, re.M):
+#         line = m.group().strip()
+#         if line and _CH.match(line):
+#             boundaries.append((m.start(), line))
+
+#     if not boundaries:
+#         return [{'title': '全文', 'body': text}]
+
+#     chapters = []
+#     for i, (pos, title) in enumerate(boundaries):
+#         end = boundaries[i+1][0] if i+1 < len(boundaries) else len(text)
+#         chapters.append({'title': title, 'body': text[pos:end]})
+#     return chapters
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 书签
+# # ══════════════════════════════════════════════════════════════
+# BM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+#                         '.moyu_bookmarks.json')
+
+# def bm_load():
+#     try:
+#         with open(BM_FILE, encoding='utf-8') as f: return json.load(f)
+#     except: return {}
+
+# def bm_save(d):
+#     try:
+#         with open(BM_FILE, 'w', encoding='utf-8') as f:
+#             json.dump(d, f, ensure_ascii=False, indent=2)
+#     except: pass
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 屏幕取色器
+# # ══════════════════════════════════════════════════════════════
+# def screen_color_picker(callback):
+#     try:
+#         from PIL import ImageGrab
+#     except ImportError:
+#         c = colorchooser.askcolor(title='选择颜色')
+#         if c and c[1]: callback(c[1])
+#         return
+
+#     from PIL import ImageGrab, Image, ImageTk
+
+#     ZOOM = 10
+#     HALF = 5
+#     CS   = (HALF*2+1) * ZOOM   # canvas size = 110
+
+#     preview = tk.Toplevel()
+#     preview.overrideredirect(True)
+#     preview.attributes('-topmost', True)
+#     preview.configure(bg='#1a1a1a')
+#     preview.geometry(f'{CS+4}x{CS+28}+200+200')
+
+#     canvas = tk.Canvas(preview, width=CS, height=CS, bg='#000',
+#                        highlightthickness=1, highlightbackground='#555',
+#                        cursor='none')
+#     canvas.pack(padx=2, pady=(2,0))
+#     lbl = tk.Label(preview, text='#000000', font=('Consolas',9,'bold'),
+#                    bg='#1a1a1a', fg='white', pady=1)
+#     lbl.pack()
+
+#     cur  = ['#000000']
+#     ph   = [None]
+#     aid  = [None]
+#     done = [False]
+
+#     def update():
+#         if done[0]: return
+#         try:
+#             mx, my = preview.winfo_pointerx(), preview.winfo_pointery()
+#             box = (mx-HALF, my-HALF, mx+HALF+1, my+HALF+1)
+#             img    = ImageGrab.grab(bbox=box)
+#             zoomed = img.resize((CS, CS), Image.NEAREST)
+#             ph[0]  = ImageTk.PhotoImage(zoomed)
+#             canvas.delete('all')
+#             canvas.create_image(0, 0, anchor='nw', image=ph[0])
+#             c2 = CS // 2
+#             canvas.create_line(c2, 0, c2, CS, fill='white', width=1)
+#             canvas.create_line(0, c2, CS, c2, fill='white', width=1)
+#             canvas.create_rectangle(c2-ZOOM, c2-ZOOM, c2+ZOOM, c2+ZOOM,
+#                                      outline='white', width=2)
+#             px = img.getpixel((HALF, HALF))
+#             hx = '#{:02x}{:02x}{:02x}'.format(px[0], px[1], px[2])
+#             cur[0] = hx
+#             lbl.config(text=hx)
+#             sw, sh = preview.winfo_screenwidth(), preview.winfo_screenheight()
+#             ox, oy = mx+18, my+18
+#             if ox+CS+10 > sw: ox = mx-CS-22
+#             if oy+CS+32 > sh: oy = my-CS-34
+#             preview.geometry(f'+{ox}+{oy}')
+#         except: pass
+#         aid[0] = preview.after(40, update)
+
+#     def finish():
+#         done[0] = True
+#         if aid[0]:
+#             try: preview.after_cancel(aid[0])
+#             except: pass
+#         for w in (overlay, preview):
+#             try: w.destroy()
+#             except: pass
+
+#     def on_pick(e):
+#         color = cur[0]; finish(); callback(color)
+
+#     def on_cancel(e=None):
+#         finish()
+
+#     overlay = tk.Toplevel()
+#     overlay.overrideredirect(True)
+#     overlay.attributes('-topmost', True)
+#     overlay.attributes('-alpha', 0.01)
+#     sw = overlay.winfo_screenwidth()
+#     sh = overlay.winfo_screenheight()
+#     overlay.geometry(f'{sw}x{sh}+0+0')
+#     overlay.configure(bg='white', cursor='crosshair')
+#     overlay.bind('<Button-1>', on_pick)
+#     overlay.bind('<Escape>',   on_cancel)
+#     overlay.focus_force()
+
+#     aid[0] = preview.after(40, update)
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 主程序
+# # ══════════════════════════════════════════════════════════════
+# class App:
+
+#     THEMES = {
+#         '暖黄': dict(bg='#fdf6e3', fg='#3c3836', bar='#ebdbb2', sel='#d5c4a1'),
+#         '夜间': dict(bg='#1e1e2e', fg='#cdd6f4', bar='#181825', sel='#313244'),
+#         '护眼': dict(bg='#1a2f1a', fg='#a8d5a2', bar='#152315', sel='#2d5a2d'),
+#         '纸张': dict(bg='#f5f0e8', fg='#2c2416', bar='#ede4d0', sel='#c8b89a'),
+#         '白底': dict(bg='#ffffff', fg='#1a1a1a', bar='#f0f0f0', sel='#dddddd'),
+#     }
+
+#     def __init__(self):
+#         self.root = tk.Tk()
+#         self.root.title('摸鱼阅读器')
+#         self.root.geometry('420x560')
+#         self.root.minsize(300, 340)
+#         self.root.attributes('-topmost', True)
+
+#         # 书籍数据
+#         self.book_path   = ''
+#         self.book_title  = ''
+#         self.chapters    = []    # [{'title':str, 'body':str}]
+#         self.cur_ch      = 0    # 当前章节索引
+#         self.bookmarks   = bm_load()
+
+#         # UI 状态
+#         self.theme_name     = '暖黄'
+#         self.custom_bg      = None
+#         self.custom_bar     = None
+#         self.font_size      = 14
+#         self.line_spacing   = 6
+#         self.font_fam       = ('宋体' if sys.platform == 'win32'
+#                                else 'Songti SC' if sys.platform == 'darwin'
+#                                else 'Noto Serif CJK SC')
+#         self._d_held        = False
+#         self._minimized     = False
+#         self._settings_open = False
+#         # 滚轮累计，用于判断翻章节
+#         self._wheel_accum   = 0
+
+#         self._build_ui()
+#         self._apply_theme()
+#         self._bind_keys()
+#         self.root.mainloop()
+
+#     # ─────────────────────────────────────────────────
+#     # UI 构建
+#     # ─────────────────────────────────────────────────
+#     def _build_ui(self):
+#         r = self.root
+
+#         # 顶部栏
+#         self.topbar = tk.Frame(r, height=30)
+#         self.topbar.pack(fill='x')
+#         self.topbar.pack_propagate(False)
+
+#         dots = tk.Frame(self.topbar)
+#         dots.pack(side='left', padx=6, pady=5)
+#         self._dot(dots, '#ff5f57', self.toggle_minimize)
+#         self._dot(dots, '#ffbd2e', self.toggle_settings)
+#         self._dot(dots, '#28ca41', self.open_file)
+
+#         self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('', 9))
+#         self.lbl_title.pack(side='left', fill='x', expand=True)
+
+#         rbf = tk.Frame(self.topbar)
+#         rbf.pack(side='right', padx=4)
+#         for lbl, cmd in [('书签', self.open_bookmarks),
+#                           ('目录', self.open_chapters),
+#                           ('打开', self.open_file),
+#                           ('×',   r.destroy)]:
+#             tk.Button(rbf, text=lbl, font=('', 8), relief='flat',
+#                       padx=3, command=cmd).pack(side='left', padx=1)
+
+#         for w in (self.topbar, self.lbl_title):
+#             w.bind('<ButtonPress-1>', self._drag_start)
+#             w.bind('<B1-Motion>',     self._drag_move)
+
+#         # 设置栏（默认隐藏）
+#         self.setbar = tk.Frame(r)
+#         self._build_setbar()
+
+#         # 分隔线
+#         self.sep = tk.Frame(r, height=1)
+#         self.sep.pack(fill='x')
+
+#         # ── 文本区（带滚动条）─────────────────────────
+#         self.txt_frame = tk.Frame(r)
+#         self.txt_frame.pack(fill='both', expand=True)
+
+#         # 竖向滚动条（细，紧贴右边）
+#         self.vsb = tk.Scrollbar(self.txt_frame, orient='vertical', width=6)
+#         self.vsb.pack(side='right', fill='y')
+
+#         self.txt = tk.Text(
+#             self.txt_frame, wrap='word',
+#             relief='flat', padx=16, pady=10,
+#             state='disabled', cursor='arrow',
+#             font=(self.font_fam, self.font_size),
+#             borderwidth=0, highlightthickness=0,
+#             spacing1=self.line_spacing,
+#             spacing2=self.line_spacing // 2,
+#             spacing3=self.line_spacing,
+#             yscrollcommand=self.vsb.set,
+#         )
+#         self.txt.pack(side='left', fill='both', expand=True)
+#         self.vsb.config(command=self.txt.yview)
+
+#         self.txt.bind('<Button-1>',   self._on_click)
+#         self.txt.bind('<MouseWheel>', self._on_wheel)     # Windows / macOS
+#         self.txt.bind('<Button-4>',   self._on_wheel)     # Linux scroll up
+#         self.txt.bind('<Button-5>',   self._on_wheel)     # Linux scroll down
+
+#         self._show_welcome()
+
+#         # 底部导航
+#         self.botbar = tk.Frame(r, height=26)
+#         self.botbar.pack(fill='x', side='bottom')
+#         self.botbar.pack_propagate(False)
+
+#         self.btn_prev = tk.Button(self.botbar, text='◀ 上章', font=('', 8),
+#                                   relief='flat', padx=5, command=self.prev_chapter)
+#         self.btn_prev.pack(side='left', padx=6, pady=3)
+
+#         self.lbl_prog = tk.Label(self.botbar, text='', font=('', 8))
+#         self.lbl_prog.pack(side='left', expand=True)
+
+#         self.btn_bm = tk.Button(self.botbar, text='🔖', font=('', 9),
+#                                 relief='flat', padx=2, command=self.add_bookmark)
+#         self.btn_bm.pack(side='right', padx=2, pady=3)
+
+#         self.btn_next = tk.Button(self.botbar, text='下章 ▶', font=('', 8),
+#                                   relief='flat', padx=5, command=self.next_chapter)
+#         self.btn_next.pack(side='right', padx=6, pady=3)
+
+#     def _dot(self, p, color, cmd):
+#         lb = tk.Label(p, text='⬤', fg=color, font=('', 12), cursor='hand2')
+#         lb.pack(side='left', padx=2)
+#         lb.bind('<Button-1>', lambda e: cmd())
+
+#     def _build_setbar(self):
+#         r1 = tk.Frame(self.setbar); r1.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r1, text='字号', font=('',8)).pack(side='left')
+#         self.sl_font = tk.Scale(r1, from_=10, to=32, orient='horizontal',
+#                                 length=70, showvalue=True, font=('',7),
+#                                 command=self._on_font_size)
+#         self.sl_font.set(self.font_size)
+#         self.sl_font.pack(side='left', padx=2)
+
+#         tk.Label(r1, text='行距', font=('',8)).pack(side='left', padx=(8,0))
+#         self.sl_spacing = tk.Scale(r1, from_=0, to=24, orient='horizontal',
+#                                    length=70, showvalue=True, font=('',7),
+#                                    command=self._on_spacing)
+#         self.sl_spacing.set(self.line_spacing)
+#         self.sl_spacing.pack(side='left', padx=2)
+
+#         r2 = tk.Frame(self.setbar); r2.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r2, text='透明', font=('',8)).pack(side='left')
+#         self.sl_alpha = tk.Scale(r2, from_=20, to=100, orient='horizontal',
+#                                  length=80, showvalue=True, font=('',7),
+#                                  command=lambda v: self.root.attributes('-alpha', int(v)/100))
+#         self.sl_alpha.set(100)
+#         self.sl_alpha.pack(side='left', padx=2)
+
+#         r3 = tk.Frame(self.setbar); r3.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r3, text='字色', font=('',8)).pack(side='left')
+#         self.btn_fg_color = tk.Button(r3, text='  ', relief='groove', width=2,
+#                                       font=('',8), command=self._pick_fg)
+#         self.btn_fg_color.pack(side='left', padx=2)
+
+#         tk.Label(r3, text='背景', font=('',8)).pack(side='left', padx=(6,0))
+#         self.btn_bg_color = tk.Button(r3, text='  ', relief='groove', width=2,
+#                                       font=('',8), command=self._pick_bg)
+#         self.btn_bg_color.pack(side='left', padx=2)
+
+#         tk.Button(r3, text='🎨取色', font=('',8), relief='flat',
+#                   padx=4, command=self._screen_pick).pack(side='left', padx=4)
+#         tk.Button(r3, text='重置', font=('',8), relief='flat',
+#                   padx=4, command=self._reset_colors).pack(side='left', padx=2)
+
+#         r4 = tk.Frame(self.setbar); r4.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r4, text='主题', font=('',8)).pack(side='left')
+#         self.var_theme = tk.StringVar(value=self.theme_name)
+#         cb = ttk.Combobox(r4, textvariable=self.var_theme,
+#                           values=list(self.THEMES.keys()),
+#                           width=7, font=('',8), state='readonly')
+#         cb.pack(side='left', padx=4)
+#         cb.bind('<<ComboboxSelected>>', self._on_theme)
+
+#     # ─────────────────────────────────────────────────
+#     # 颜色 / 主题
+#     # ─────────────────────────────────────────────────
+#     def _pick_fg(self):
+#         t = self._cur_theme()
+#         c = colorchooser.askcolor(color=t['fg'], title='选择字体颜色')
+#         if c and c[1]:
+#             self.THEMES[self.theme_name]['fg'] = c[1]
+#             self.txt.config(fg=c[1])
+#             self.btn_fg_color.config(bg=c[1])
+
+#     def _pick_bg(self):
+#         c = colorchooser.askcolor(color=self._cur_theme()['bg'], title='选择背景颜色')
+#         if c and c[1]: self._apply_custom_bg(c[1])
+
+#     def _screen_pick(self):
+#         alpha = self.sl_alpha.get() / 100
+#         self.root.attributes('-alpha', 0.0)
+#         def on_color(hx):
+#             self.root.after(100, lambda: self.root.attributes('-alpha', alpha))
+#             self._apply_custom_bg(hx)
+#         self.root.after(120, lambda: screen_color_picker(on_color))
+
+#     def _apply_custom_bg(self, hx):
+#         self.custom_bg  = hx
+#         self.custom_bar = self._darken(hx, 0.88)
+#         self._apply_theme()
+#         try: self.btn_bg_color.config(bg=hx)
+#         except: pass
+
+#     def _reset_colors(self):
+#         self.custom_bg = self.custom_bar = None
+#         self._apply_theme()
+
+#     def _darken(self, hx, f=0.88):
+#         h = hx.lstrip('#')
+#         return '#{:02x}{:02x}{:02x}'.format(
+#             int(int(h[0:2],16)*f), int(int(h[2:4],16)*f), int(int(h[4:6],16)*f))
+
+#     def _cur_theme(self):
+#         import copy
+#         t = copy.copy(self.THEMES[self.theme_name])
+#         if self.custom_bg:  t['bg']  = self.custom_bg
+#         if self.custom_bar: t['bar'] = self.custom_bar
+#         return t
+
+#     def _on_theme(self, e=None):
+#         self.theme_name = self.var_theme.get()
+#         self.custom_bg = self.custom_bar = None
+#         self._apply_theme()
+
+#     def _apply_theme(self):
+#         t = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+#         self.root.configure(bg=bar)
+#         self._cf(self.topbar, bar, fg)
+#         self._cf(self.botbar, bar, fg)
+#         self.sep.config(bg=sel)
+#         self.txt_frame.config(bg=bg)
+#         self.vsb.config(bg=bar, troughcolor=bg, activebackground=sel)
+#         self.txt.config(bg=bg, fg=fg, insertbackground=fg, selectbackground=sel)
+#         self.lbl_prog.config(bg=bar, fg=fg)
+#         self.btn_bm.config(bg=bar, fg=fg, activebackground=sel)
+#         for b in (self.btn_prev, self.btn_next):
+#             b.config(bg=bar, fg=fg, activebackground=sel)
+#         self._retheme_setbar()
+#         try:
+#             if self.custom_bg: self.btn_bg_color.config(bg=self.custom_bg)
+#         except: pass
+
+#     def _cf(self, fr, bg, fg):
+#         try: fr.config(bg=bg)
+#         except: pass
+#         for w in fr.winfo_children():
+#             try: w.config(bg=bg, fg=fg, activebackground=bg)
+#             except: pass
+#             for w2 in w.winfo_children():
+#                 try: w2.config(bg=bg, fg=fg, activebackground=bg)
+#                 except: pass
+
+#     def _retheme_setbar(self):
+#         t = self._cur_theme()
+#         bg, fg, sel = t['bar'], t['fg'], t['sel']
+#         self._cf(self.setbar, bg, fg)
+#         for sl in (self.sl_font, self.sl_alpha, self.sl_spacing):
+#             try: sl.config(bg=bg, fg=fg, troughcolor=sel, activebackground=sel)
+#             except: pass
+#         try: self.btn_fg_color.config(bg=fg)
+#         except: pass
+
+#     # ─────────────────────────────────────────────────
+#     # 拖动窗口
+#     # ─────────────────────────────────────────────────
+#     def _drag_start(self, e):
+#         self._dx = e.x_root - self.root.winfo_x()
+#         self._dy = e.y_root - self.root.winfo_y()
+
+#     def _drag_move(self, e):
+#         self.root.geometry(f'+{e.x_root-self._dx}+{e.y_root-self._dy}')
+
+#     # ─────────────────────────────────────────────────
+#     # 打开文件
+#     # ─────────────────────────────────────────────────
+#     def open_file(self):
+#         path = filedialog.askopenfilename(
+#             title='打开小说',
+#             filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')]
+#         )
+#         if not path: return
+#         ext = os.path.splitext(path)[1].lower()
+#         if ext == '.epub':
+#             title, text = read_epub(path)
+#         else:
+#             title = os.path.splitext(os.path.basename(path))[0]
+#             try:
+#                 with open(path, encoding='utf-8', errors='replace') as f:
+#                     text = f.read()
+#             except Exception as e:
+#                 messagebox.showerror('错误', str(e)); return
+
+#         self.book_path  = path
+#         self.book_title = title
+#         self.lbl_title.config(text=f'  {title}')
+#         self.root.title(f'摸鱼阅读器 — {title}')
+#         self._load(text, restore_bm=True)
+
+#     def _load(self, text, restore_bm=False):
+#         self.chapters = split_chapters(text)
+#         self.cur_ch   = 0
+#         if restore_bm and self.book_path in self.bookmarks:
+#             saved = self.bookmarks[self.book_path].get('chapter', 0)
+#             self.cur_ch = max(0, min(saved, len(self.chapters)-1))
+#         self._render_chapter()
+
+#     # ─────────────────────────────────────────────────
+#     # 渲染章节（核心：直接把整章文本塞进 Text）
+#     # ─────────────────────────────────────────────────
+#     def _render_chapter(self, scroll_to_top=True):
+#         if not self.chapters: return
+#         self.cur_ch = max(0, min(self.cur_ch, len(self.chapters)-1))
+#         ch = self.chapters[self.cur_ch]
+
+#         self.txt.config(state='normal')
+#         self.txt.delete('1.0', 'end')
+#         self.txt.insert('1.0', ch['body'])
+#         self.txt.config(state='disabled')
+
+#         if scroll_to_top:
+#             self.txt.yview_moveto(0.0)
+
+#         self._update_nav()
+#         self._wheel_accum = 0
+
+#     def _update_nav(self):
+#         n   = len(self.chapters)
+#         idx = self.cur_ch + 1
+#         self.lbl_prog.config(text=f'第 {idx} / {n} 章')
+#         self.btn_prev.config(state='normal' if self.cur_ch > 0   else 'disabled')
+#         self.btn_next.config(state='normal' if self.cur_ch < n-1 else 'disabled')
+
+#     # ─────────────────────────────────────────────────
+#     # 章节切换
+#     # ─────────────────────────────────────────────────
+#     def next_chapter(self):
+#         if self.chapters and self.cur_ch < len(self.chapters)-1:
+#             self.cur_ch += 1
+#             self._render_chapter(scroll_to_top=True)
+
+#     def prev_chapter(self):
+#         if self.chapters and self.cur_ch > 0:
+#             self.cur_ch -= 1
+#             self._render_chapter(scroll_to_top=True)
+
+#     def goto_chapter(self, idx):
+#         if not self.chapters: return
+#         self.cur_ch = max(0, min(idx, len(self.chapters)-1))
+#         self._render_chapter(scroll_to_top=True)
+
+#     # ─────────────────────────────────────────────────
+#     # 点击：左侧上章 / 右侧下章（忽略中间 38%~62% 区域）
+#     # ─────────────────────────────────────────────────
+#     def _on_click(self, e):
+#         w = self.txt.winfo_width()
+#         if   e.x < w * 0.30:
+#             self.prev_chapter()
+#         elif e.x > w * 0.70:
+#             self.next_chapter()
+#         # 中间区域：不响应（方便选文字）
+
+#     # ─────────────────────────────────────────────────
+#     # 滚轮：章内正常滚动；到达顶/底时累计后切章
+#     # ─────────────────────────────────────────────────
+#     def _on_wheel(self, e):
+#         # 判断滚动方向
+#         if e.num == 4:          # Linux up
+#             delta = 1
+#         elif e.num == 5:        # Linux down
+#             delta = -1
+#         else:
+#             delta = 1 if e.delta > 0 else -1   # Windows/macOS
+
+#         # 当前滚动位置 (top_frac, bottom_frac)
+#         top, bot = self.txt.yview()
+
+#         if delta < 0:   # 向下滚
+#             if bot >= 0.999:
+#                 # 已在底部，累计后切下一章
+#                 self._wheel_accum -= 1
+#                 if self._wheel_accum <= -3:
+#                     self.next_chapter()
+#                     return
+#             else:
+#                 self._wheel_accum = 0
+#                 self.txt.yview_scroll(3, 'units')
+#         else:           # 向上滚
+#             if top <= 0.001:
+#                 # 已在顶部，累计后切上一章
+#                 self._wheel_accum += 1
+#                 if self._wheel_accum >= 3:
+#                     self.prev_chapter()
+#                     # 切到上章后滚动到底部
+#                     self.root.after(30, lambda: self.txt.yview_moveto(1.0))
+#                     return
+#             else:
+#                 self._wheel_accum = 0
+#                 self.txt.yview_scroll(-3, 'units')
+
+#     # ─────────────────────────────────────────────────
+#     # S 键：向下翻一屏
+#     # ─────────────────────────────────────────────────
+#     def _scroll_down_screen(self):
+#         top, bot = self.txt.yview()
+#         if bot >= 0.999:
+#             self.next_chapter()
+#         else:
+#             self.txt.yview_scroll(1, 'pages')
+
+#     # ─────────────────────────────────────────────────
+#     # 欢迎页
+#     # ─────────────────────────────────────────────────
+#     def _show_welcome(self):
+#         self.txt.config(state='normal')
+#         self.txt.delete('1.0','end')
+#         self.txt.insert('1.0', (
+#             '\n\n\n\n'
+#             '       📚  摸鱼阅读器\n\n'
+#             '  支持：TXT  /  EPUB  /  MD\n\n'
+#             '  ● 右上角 [打开] 选择文件\n'
+#             '  ● 绿色圆点 快速打开\n'
+#             '  ● 黄色圆点 打开设置\n\n'
+#             '  操作方式：\n'
+#             '    滚轮          章内上下滚动\n'
+#             '    滚轮到底/顶   自动切换章节\n'
+#             '    点击左侧 30%  上一章\n'
+#             '    点击右侧 30%  下一章\n'
+#             '    S / ↓         向下翻一屏\n'
+#             '    ← / →         切换章节\n'
+#             '    D + E         最小化\n'
+#         ))
+#         self.txt.config(state='disabled')
+
+#     # ─────────────────────────────────────────────────
+#     # 最小化
+#     # ─────────────────────────────────────────────────
+#     def toggle_minimize(self):
+#         self._minimized = not self._minimized
+#         if self._minimized:
+#             self._saved_h = self.root.winfo_height()
+#             for w in (self.setbar, self.sep, self.txt_frame, self.botbar):
+#                 w.pack_forget()
+#             self.root.geometry(f'{self.root.winfo_width()}x30')
+#         else:
+#             self.root.geometry(f'{self.root.winfo_width()}x{self._saved_h}')
+#             self.sep.pack(fill='x', after=self.topbar)
+#             if self._settings_open:
+#                 self.setbar.pack(fill='x', after=self.topbar)
+#                 self._retheme_setbar()
+#             self.txt_frame.pack(fill='both', expand=True)
+#             self.botbar.pack(fill='x', side='bottom')
+
+#     # ─────────────────────────────────────────────────
+#     # 设置栏
+#     # ─────────────────────────────────────────────────
+#     def toggle_settings(self):
+#         self._settings_open = not self._settings_open
+#         if self._settings_open:
+#             self.setbar.pack(fill='x', after=self.topbar)
+#             self._retheme_setbar()
+#         else:
+#             self.setbar.pack_forget()
+
+#     def _on_font_size(self, val):
+#         self.font_size = int(float(val))
+#         self.txt.config(font=(self.font_fam, self.font_size))
+
+#     def _on_spacing(self, val):
+#         self.line_spacing = int(float(val))
+#         sp = self.line_spacing
+#         self.txt.config(spacing1=sp, spacing2=sp//2, spacing3=sp)
+
+#     # ─────────────────────────────────────────────────
+#     # 章节目录
+#     # ─────────────────────────────────────────────────
+#     def open_chapters(self):
+#         if not self.chapters:
+#             messagebox.showinfo('提示','请先打开一本小说'); return
+
+#         t  = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+#         win = tk.Toplevel(self.root)
+#         win.title('章节目录')
+#         win.geometry('300x480')
+#         win.resizable(True, True)
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+
+#         hdr = tk.Frame(win, bg=bar, height=28)
+#         hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr, text='📑 章节目录', font=('',9,'bold'),
+#                  bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
+#         tk.Button(hdr, text='×', relief='flat', font=('',10),
+#                   bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+#         # 搜索
+#         sf = tk.Frame(win, bg=bg); sf.pack(fill='x', padx=6, pady=(6,2))
+#         sv = tk.StringVar()
+#         se = tk.Entry(sf, textvariable=sv, font=('',9), bg=bg, fg=fg,
+#                       insertbackground=fg, relief='groove')
+#         se.pack(fill='x', ipady=3)
+#         PH = '搜索章节名...'
+#         se.insert(0, PH); se.config(fg='gray')
+#         se.bind('<FocusIn>',  lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
+#         se.bind('<FocusOut>', lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
+
+#         # 列表
+#         lf = tk.Frame(win, bg=bg); lf.pack(fill='both', expand=True, padx=4, pady=4)
+#         sb2 = tk.Scrollbar(lf); sb2.pack(side='right', fill='y')
+#         lb = tk.Listbox(lf, font=('',10), relief='flat', bg=bg, fg=fg,
+#                         selectbackground=sel, selectforeground=fg,
+#                         borderwidth=0, highlightthickness=0,
+#                         activestyle='none', yscrollcommand=sb2.set)
+#         lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+
+#         btn_j = tk.Button(win, text='↩  跳转到选中章节', font=('',9,'bold'),
+#                           bg=bar, fg=fg, relief='flat', pady=5)
+#         btn_j.pack(fill='x', padx=6, pady=4)
+
+#         all_ch  = list(self.chapters)   # [{'title','body'}]
+#         visible = list(range(len(all_ch)))  # 存索引
+
+#         def fill(indices):
+#             visible.clear(); visible.extend(indices)
+#             lb.delete(0,'end')
+#             for i in indices:
+#                 lb.insert('end', f'  {i+1}. {all_ch[i]["title"]}')
+
+#         fill(range(len(all_ch)))
+#         # 高亮当前
+#         try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
+#         except: pass
+
+#         def on_search(*_):
+#             q = sv.get().strip()
+#             if q in ('', PH):
+#                 fill(range(len(all_ch)))
+#             else:
+#                 fill([i for i,c in enumerate(all_ch) if q in c['title']])
+#         sv.trace_add('write', on_search)
+
+#         def jump(event=None):
+#             idxs = lb.curselection()
+#             if not idxs: return
+#             real_idx = visible[idxs[0]]
+#             win.destroy()
+#             self.goto_chapter(real_idx)
+
+#         btn_j.config(command=jump)
+#         lb.bind('<Double-Button-1>', jump)
+#         lb.bind('<Return>', jump)
+
+#         rx = self.root.winfo_x() + self.root.winfo_width() + 8
+#         ry = self.root.winfo_y()
+#         win.geometry(f'300x480+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 书签
+#     # ─────────────────────────────────────────────────
+#     def add_bookmark(self):
+#         if not self.book_path:
+#             messagebox.showinfo('提示','请先打开一本小说'); return
+#         ch = self.chapters[self.cur_ch] if self.chapters else {}
+#         self.bookmarks[self.book_path] = {
+#             'title':    self.book_title,
+#             'chapter':  self.cur_ch,
+#             'total':    len(self.chapters),
+#             'ch_title': ch.get('title',''),
+#             'path':     self.book_path,
+#         }
+#         bm_save(self.bookmarks)
+#         n = len(self.chapters)
+#         messagebox.showinfo('🔖 书签',
+#             f'已保存\n第 {self.cur_ch+1} / {n} 章\n{ch.get("title","")}')
+
+#     def open_bookmarks(self):
+#         if not self.bookmarks:
+#             messagebox.showinfo('书签','暂无书签'); return
+#         t  = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+#         win = tk.Toplevel(self.root)
+#         win.title('书签'); win.geometry('320x300')
+#         win.resizable(True,True); win.attributes('-topmost',True)
+#         win.configure(bg=bg)
+
+#         hdr = tk.Frame(win, bg=bar, height=28)
+#         hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr, text='🔖 书签列表', font=('',9,'bold'),
+#                  bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
+#         tk.Button(hdr, text='×', relief='flat', font=('',10),
+#                   bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+#         lf = tk.Frame(win, bg=bg); lf.pack(fill='both', expand=True, padx=4, pady=4)
+#         sb2 = tk.Scrollbar(lf); sb2.pack(side='right', fill='y')
+#         lb = tk.Listbox(lf, font=('',10), relief='flat', bg=bg, fg=fg,
+#                         selectbackground=sel, selectforeground=fg,
+#                         borderwidth=0, highlightthickness=0,
+#                         activestyle='none', yscrollcommand=sb2.set)
+#         lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+
+#         keys = list(self.bookmarks.keys())
+#         for k in keys:
+#             bm = self.bookmarks[k]
+#             s  = f"  {bm['title']}  第{bm['chapter']+1}章"
+#             if bm.get('ch_title'): s += f"  ·  {bm['ch_title']}"
+#             lb.insert('end', s)
+
+#         bf = tk.Frame(win, bg=bar); bf.pack(fill='x', padx=6, pady=4)
+
+#         def goto_bm():
+#             idxs = lb.curselection()
+#             if not idxs: return
+#             bm = self.bookmarks[keys[idxs[0]]]
+#             win.destroy()
+#             if bm['path'] != self.book_path:
+#                 ext = os.path.splitext(bm['path'])[1].lower()
+#                 try:
+#                     if ext == '.epub': _t, text = read_epub(bm['path'])
+#                     else:
+#                         with open(bm['path'],encoding='utf-8',errors='replace') as f: text=f.read()
+#                 except:
+#                     messagebox.showerror('错误','文件不存在或已移动'); return
+#                 self.book_path = bm['path']; self.book_title = bm['title']
+#                 self.lbl_title.config(text=f"  {bm['title']}")
+#                 self.root.title(f"摸鱼阅读器 — {bm['title']}")
+#                 self.chapters = split_chapters(text)
+#             self.goto_chapter(bm['chapter'])
+
+#         def del_bm():
+#             idxs = lb.curselection()
+#             if not idxs: return
+#             k = keys.pop(idxs[0])
+#             del self.bookmarks[k]; bm_save(self.bookmarks)
+#             lb.delete(idxs[0])
+
+#         tk.Button(bf, text='跳转', font=('',9), bg=bar, fg=fg,
+#                   relief='flat', padx=8, command=goto_bm).pack(side='left', padx=4)
+#         tk.Button(bf, text='删除', font=('',9), bg=bar, fg=fg,
+#                   relief='flat', padx=8, command=del_bm).pack(side='left', padx=4)
+
+#         rx = self.root.winfo_x() + self.root.winfo_width() + 8
+#         ry = self.root.winfo_y()
+#         win.geometry(f'320x300+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 快捷键
+#     # ─────────────────────────────────────────────────
+#     def _bind_keys(self):
+#         r = self.root
+#         r.bind('<KeyPress-s>',   lambda e: self._scroll_down_screen())
+#         r.bind('<KeyPress-S>',   lambda e: self._scroll_down_screen())
+#         r.bind('<Right>',        lambda e: self.next_chapter())
+#         r.bind('<Left>',         lambda e: self.prev_chapter())
+#         r.bind('<Down>',         lambda e: self._scroll_down_screen())
+#         r.bind('<Up>',           lambda e: self.txt.yview_scroll(-3,'units'))
+#         r.bind('<KeyPress-d>',   self._dp)
+#         r.bind('<KeyPress-D>',   self._dp)
+#         r.bind('<KeyRelease-d>', self._dr)
+#         r.bind('<KeyRelease-D>', self._dr)
+#         r.bind('<KeyPress-e>',   self._ep)
+#         r.bind('<KeyPress-E>',   self._ep)
+#         r.focus_set()
+
+#     def _dp(self, e): self._d_held = True
+#     def _dr(self, e): self._d_held = False
+#     def _ep(self, e):
+#         if self._d_held: self.toggle_minimize()
+
+
+# # ══════════════════════════════════════════════════════════════
+# if __name__ == '__main__':
+#     try:
+#         from ctypes import windll
+#         windll.shcore.SetProcessDpiAwareness(1)
+#     except: pass
+#     App()
+
+
+##  V2测试
+
+# """
+# 摸鱼阅读器 v7.0
+# 新增：
+#   · 底部进度拖拽条（可拖拽跳章节，书签在条上显示小旗）
+#   · O 键快速创建书签标记（支持多书签）
+#   · 书签列表支持跳转 / 删除单条
+
+# 运行：python novel_reader.py
+# 打包：pip install pyinstaller
+#       pyinstaller --onefile --windowed --name 摸鱼阅读器 novel_reader.py
+# 屏幕取色需要 Pillow：pip install pillow
+# """
+
+# import tkinter as tk
+# from tkinter import ttk, filedialog, colorchooser, messagebox
+# import os, re, zipfile, sys, json, copy
+# from html.parser import HTMLParser
+
+
+# # ══════════════════════════════════════════════════════════════
+# # HTML → 纯文本
+# # ══════════════════════════════════════════════════════════════
+# class _H2T(HTMLParser):
+#     SKIP  = {'script','style','head','meta','link'}
+#     BLOCK = {'p','div','br','h1','h2','h3','h4','h5',
+#              'h6','li','tr','td','th','section','article'}
+#     def __init__(self):
+#         super().__init__()
+#         self.out, self._s = [], 0
+#     def handle_starttag(self, tag, _):
+#         if tag in self.SKIP:  self._s += 1
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_endtag(self, tag):
+#         if tag in self.SKIP:  self._s = max(0, self._s - 1)
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_data(self, d):
+#         if not self._s: self.out.append(d)
+#     def text(self):
+#         return re.sub(r'\n{3,}', '\n\n', ''.join(self.out)).strip()
+
+# def html2text(s):
+#     p = _H2T()
+#     try: p.feed(s)
+#     except: pass
+#     return p.text()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # EPUB
+# # ══════════════════════════════════════════════════════════════
+# def read_epub(path):
+#     import xml.etree.ElementTree as ET
+#     title = os.path.splitext(os.path.basename(path))[0]
+#     body  = ''
+#     try:
+#         with zipfile.ZipFile(path) as z:
+#             ns = z.namelist()
+#             opf, odir = '', ''
+#             if 'META-INF/container.xml' in ns:
+#                 for el in ET.fromstring(z.read('META-INF/container.xml')).iter():
+#                     if el.tag.endswith('rootfile'):
+#                         opf  = el.get('full-path', '')
+#                         odir = opf.rsplit('/', 1)[0] if '/' in opf else ''
+#                         break
+#             items, spine = {}, []
+#             if opf and opf in ns:
+#                 root = ET.fromstring(z.read(opf))
+#                 for el in root.iter():
+#                     tag = el.tag.split('}')[-1]
+#                     if tag == 'item':
+#                         mid  = el.get('id','')
+#                         href = el.get('href','')
+#                         mt   = el.get('media-type','')
+#                         if href and ('html' in mt or href.endswith(('.html','.xhtml','.htm'))):
+#                             items[mid] = (odir+'/'+href).lstrip('/') if odir else href
+#                     elif tag == 'itemref':
+#                         r = el.get('idref','')
+#                         if r in items: spine.append(items[r])
+#                     elif tag == 'title' and el.text:
+#                         title = el.text
+#             if not spine:
+#                 spine = sorted(f for f in ns
+#                                if re.search(r'\.(html|htm|xhtml)$', f, re.I)
+#                                and 'toc' not in f.lower() and 'nav' not in f.lower())
+#             for href in spine:
+#                 if href in ns:
+#                     try: body += html2text(z.read(href).decode('utf-8','replace')) + '\n\n'
+#                     except: pass
+#     except Exception as e:
+#         body = f'[EPUB解析失败: {e}]'
+#     return title, body.strip()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 章节切割
+# # ══════════════════════════════════════════════════════════════
+# _CH = re.compile(
+#     r'^(第\s*[零一二三四五六七八九十百千万\d〇]+\s*[章节卷集回部篇][^\n]{0,40}'
+#     r'|Chapter\s*\d+[^\n]{0,40}'
+#     r'|CHAPTER\s*\d+[^\n]{0,40}'
+#     r'|【[^\n]{1,30}】)', re.I)
+
+# def split_chapters(text):
+#     boundaries = []
+#     for m in re.finditer(r'^.+$', text, re.M):
+#         line = m.group().strip()
+#         if line and _CH.match(line):
+#             boundaries.append((m.start(), line))
+#     if not boundaries:
+#         return [{'title': '全文', 'body': text}]
+#     chapters = []
+#     for i, (pos, title) in enumerate(boundaries):
+#         end = boundaries[i+1][0] if i+1 < len(boundaries) else len(text)
+#         chapters.append({'title': title, 'body': text[pos:end]})
+#     return chapters
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 书签存储  —  支持每本书多个标记书签
+# # ══════════════════════════════════════════════════════════════
+# BM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+#                         '.moyu_bookmarks.json')
+
+# def bm_load():
+#     try:
+#         with open(BM_FILE, encoding='utf-8') as f: return json.load(f)
+#     except: return {}
+
+# def bm_save(d):
+#     try:
+#         with open(BM_FILE, 'w', encoding='utf-8') as f:
+#             json.dump(d, f, ensure_ascii=False, indent=2)
+#     except: pass
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 屏幕取色器
+# # ══════════════════════════════════════════════════════════════
+# def screen_color_picker(callback):
+#     try:
+#         from PIL import ImageGrab
+#     except ImportError:
+#         c = colorchooser.askcolor(title='选择颜色')
+#         if c and c[1]: callback(c[1])
+#         return
+
+#     from PIL import ImageGrab, Image, ImageTk
+#     ZOOM, HALF = 10, 5
+#     CS = (HALF*2+1) * ZOOM
+
+#     preview = tk.Toplevel()
+#     preview.overrideredirect(True)
+#     preview.attributes('-topmost', True)
+#     preview.configure(bg='#1a1a1a')
+#     preview.geometry(f'{CS+4}x{CS+28}+200+200')
+
+#     canvas = tk.Canvas(preview, width=CS, height=CS, bg='#000',
+#                        highlightthickness=1, highlightbackground='#555', cursor='none')
+#     canvas.pack(padx=2, pady=(2,0))
+#     lbl = tk.Label(preview, text='#000000', font=('Consolas',9,'bold'),
+#                    bg='#1a1a1a', fg='white', pady=1)
+#     lbl.pack()
+
+#     cur, ph, aid, done = ['#000000'], [None], [None], [False]
+
+#     def update():
+#         if done[0]: return
+#         try:
+#             mx, my = preview.winfo_pointerx(), preview.winfo_pointery()
+#             img    = ImageGrab.grab(bbox=(mx-HALF, my-HALF, mx+HALF+1, my+HALF+1))
+#             zoomed = img.resize((CS, CS), Image.NEAREST)
+#             ph[0]  = ImageTk.PhotoImage(zoomed)
+#             canvas.delete('all')
+#             canvas.create_image(0, 0, anchor='nw', image=ph[0])
+#             c2 = CS//2
+#             canvas.create_line(c2, 0, c2, CS, fill='white', width=1)
+#             canvas.create_line(0, c2, CS, c2, fill='white', width=1)
+#             canvas.create_rectangle(c2-ZOOM, c2-ZOOM, c2+ZOOM, c2+ZOOM, outline='white', width=2)
+#             px  = img.getpixel((HALF, HALF))
+#             hx  = '#{:02x}{:02x}{:02x}'.format(px[0], px[1], px[2])
+#             cur[0] = hx; lbl.config(text=hx)
+#             sw, sh = preview.winfo_screenwidth(), preview.winfo_screenheight()
+#             ox, oy = mx+18, my+18
+#             if ox+CS+10 > sw: ox = mx-CS-22
+#             if oy+CS+32 > sh: oy = my-CS-34
+#             preview.geometry(f'+{ox}+{oy}')
+#         except: pass
+#         aid[0] = preview.after(40, update)
+
+#     def finish():
+#         done[0] = True
+#         if aid[0]:
+#             try: preview.after_cancel(aid[0])
+#             except: pass
+#         for w in (overlay, preview):
+#             try: w.destroy()
+#             except: pass
+
+#     overlay = tk.Toplevel()
+#     overlay.overrideredirect(True)
+#     overlay.attributes('-topmost', True)
+#     overlay.attributes('-alpha', 0.01)
+#     sw, sh = overlay.winfo_screenwidth(), overlay.winfo_screenheight()
+#     overlay.geometry(f'{sw}x{sh}+0+0')
+#     overlay.configure(bg='white', cursor='crosshair')
+#     overlay.bind('<Button-1>', lambda e: (finish(), callback(cur[0])))
+#     overlay.bind('<Escape>',   lambda e: finish())
+#     overlay.focus_force()
+#     aid[0] = preview.after(40, update)
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 自定义竖向滚动条（Canvas 实现，支持拖拽，圆角滑块）
+# # ══════════════════════════════════════════════════════════════
+# class SmoothScrollbar:
+#     """
+#     替代原生 Scrollbar：
+#       · 宽度可设置，默认 10px
+#       · 圆角滑块，颜色随主题
+#       · 支持点击轨道跳转、拖拽滑块
+#       · 接口兼容原生 Scrollbar：set(lo, hi) / get()
+#     """
+#     W = 10      # 滚动条宽度
+
+#     def __init__(self, parent, on_scroll, **kw):
+#         """on_scroll(fraction) 当用户拖拽/点击时调用，fraction ∈ [0,1]"""
+#         self.on_scroll = on_scroll
+#         self._lo = 0.0
+#         self._hi = 1.0
+#         self._dragging  = False
+#         self._drag_start_y    = 0
+#         self._drag_start_lo   = 0.0
+
+#         # 颜色
+#         self.c_bg    = '#ebdbb2'
+#         self.c_track = '#d5c4a1'
+#         self.c_thumb = '#b8a57a'
+#         self.c_hover = '#9a8060'
+
+#         self.cv = tk.Canvas(parent, width=self.W,
+#                             highlightthickness=0, cursor='arrow', **kw)
+#         self.cv.pack(side='right', fill='y')
+
+#         self.cv.bind('<Configure>',       lambda e: self._draw())
+#         self.cv.bind('<ButtonPress-1>',   self._press)
+#         self.cv.bind('<B1-Motion>',       self._drag)
+#         self.cv.bind('<ButtonRelease-1>', self._release)
+#         self.cv.bind('<Enter>',           lambda e: self._set_hover(True))
+#         self.cv.bind('<Leave>',           lambda e: self._set_hover(False))
+#         self._hover = False
+
+#     # ── 外部接口（兼容 Text yscrollcommand）────────────
+#     def set(self, lo, hi):
+#         """Text widget 调用此方法更新滑块位置"""
+#         self._lo = float(lo)
+#         self._hi = float(hi)
+#         self._draw()
+
+#     def set_colors(self, bg, track, thumb, thumb_hover):
+#         self.c_bg    = bg
+#         self.c_track = track
+#         self.c_thumb = thumb
+#         self.c_hover = thumb_hover
+#         self._draw()
+
+#     # ── 绘制 ────────────────────────────────────────────
+#     def _draw(self):
+#         cv  = self.cv
+#         W   = self.W
+#         H   = cv.winfo_height()
+#         if H < 4: return
+#         cv.delete('all')
+
+#         PAD = 2   # 上下留白
+
+#         # 背景 / 轨道
+#         cv.create_rectangle(0, 0, W, H, fill=self.c_bg, outline='')
+#         tx = W // 2
+#         cv.create_line(tx, PAD, tx, H - PAD,
+#                        fill=self.c_track, width=W - 4, capstyle='round')
+
+#         # 滑块
+#         thumb_h = max(20, int((self._hi - self._lo) * (H - 2*PAD)))
+#         thumb_y = PAD + int(self._lo * (H - 2*PAD))
+#         thumb_y2 = min(H - PAD, thumb_y + thumb_h)
+
+#         color = self.c_hover if self._hover else self.c_thumb
+#         r = (W - 4) // 2     # 圆角半径
+
+#         # 用 create_oval + rectangle 模拟圆角矩形
+#         x1, x2 = 2, W - 2
+#         y1, y2 = thumb_y, thumb_y2
+#         if y2 - y1 >= 2*r:
+#             cv.create_rectangle(x1, y1+r, x2, y2-r, fill=color, outline='')
+#             cv.create_oval(x1, y1, x2, y1+2*r, fill=color, outline='')
+#             cv.create_oval(x1, y2-2*r, x2, y2, fill=color, outline='')
+#         else:
+#             cv.create_oval(x1, y1, x2, y2, fill=color, outline='')
+
+#     def _set_hover(self, v):
+#         self._hover = v
+#         self._draw()
+
+#     # ── 交互 ────────────────────────────────────────────
+#     def _y_to_frac(self, y):
+#         H   = self.cv.winfo_height()
+#         PAD = 2
+#         return max(0.0, min(1.0, (y - PAD) / max(1, H - 2*PAD)))
+
+#     def _thumb_range(self):
+#         H   = self.cv.winfo_height()
+#         PAD = 2
+#         th  = max(20, int((self._hi - self._lo) * (H - 2*PAD)))
+#         ty  = PAD + int(self._lo * (H - 2*PAD))
+#         return ty, ty + th
+
+#     def _press(self, e):
+#         ty1, ty2 = self._thumb_range()
+#         if ty1 <= e.y <= ty2:
+#             # 点在滑块上 → 开始拖拽
+#             self._dragging       = True
+#             self._drag_start_y   = e.y
+#             self._drag_start_lo  = self._lo
+#         else:
+#             # 点在轨道 → 直接跳转到点击位置（页面中心对齐点击处）
+#             frac = self._y_to_frac(e.y)
+#             span = self._hi - self._lo
+#             target = max(0.0, min(1.0 - span, frac - span / 2))
+#             self.on_scroll(target)
+
+#     def _drag(self, e):
+#         if not self._dragging: return
+#         H   = self.cv.winfo_height()
+#         PAD = 2
+#         dy  = e.y - self._drag_start_y
+#         delta = dy / max(1, H - 2*PAD)
+#         span  = self._hi - self._lo
+#         target = max(0.0, min(1.0 - span, self._drag_start_lo + delta))
+#         self._lo = target
+#         self._hi = target + span
+#         self._draw()
+#         self.on_scroll(target)
+
+#     def _release(self, e):
+#         self._dragging = False
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 主程序
+# # ══════════════════════════════════════════════════════════════
+# class App:
+
+#     THEMES = {
+#         '暖黄': dict(bg='#fdf6e3', fg='#3c3836', bar='#ebdbb2', sel='#d5c4a1',
+#                     thumb='#b8a882', thumb_h='#8f7a55'),
+#         '夜间': dict(bg='#1e1e2e', fg='#cdd6f4', bar='#181825', sel='#313244',
+#                     thumb='#45475a', thumb_h='#6c7086'),
+#         '护眼': dict(bg='#1a2f1a', fg='#a8d5a2', bar='#152315', sel='#2d5a2d',
+#                     thumb='#3a6b3a', thumb_h='#57c454'),
+#         '纸张': dict(bg='#f5f0e8', fg='#2c2416', bar='#ede4d0', sel='#c8b89a',
+#                     thumb='#c8a882', thumb_h='#8b6045'),
+#         '白底': dict(bg='#ffffff', fg='#1a1a1a', bar='#f0f0f0', sel='#dddddd',
+#                     thumb='#bbbbbb', thumb_h='#888888'),
+#     }
+
+#     def __init__(self):
+#         self.root = tk.Tk()
+#         self.root.title('摸鱼阅读器')
+#         self.root.geometry('420x580')
+#         self.root.minsize(300, 360)
+#         self.root.attributes('-topmost', True)
+
+#         # 书籍数据
+#         self.book_path   = ''
+#         self.book_title  = ''
+#         self.chapters    = []
+#         self.cur_ch      = 0
+#         self.bookmarks   = bm_load()   # {path: {meta, marks:[{chapter,ch_title,note}]}}
+
+#         # UI 状态
+#         self.theme_name     = '暖黄'
+#         self.custom_bg      = None
+#         self.custom_bar     = None
+#         self.font_size      = 14
+#         self.line_spacing   = 6
+#         self.font_fam       = ('宋体' if sys.platform == 'win32'
+#                                else 'Songti SC' if sys.platform == 'darwin'
+#                                else 'Noto Serif CJK SC')
+#         self._d_held        = False
+#         self._minimized     = False
+#         self._settings_open = False
+#         self._wheel_accum   = 0
+
+#         self._build_ui()
+#         self._apply_theme()
+#         self._bind_keys()
+#         self.root.mainloop()
+
+#     # ─────────────────────────────────────────────────
+#     # UI 构建
+#     # ─────────────────────────────────────────────────
+#     def _build_ui(self):
+#         r = self.root
+
+#         # 顶部栏
+#         self.topbar = tk.Frame(r, height=30)
+#         self.topbar.pack(fill='x')
+#         self.topbar.pack_propagate(False)
+
+#         dots = tk.Frame(self.topbar)
+#         dots.pack(side='left', padx=6, pady=5)
+#         self._dot(dots, '#ff5f57', self.toggle_minimize)
+#         self._dot(dots, '#ffbd2e', self.toggle_settings)
+#         self._dot(dots, '#28ca41', self.open_file)
+
+#         self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('', 9))
+#         self.lbl_title.pack(side='left', fill='x', expand=True)
+
+#         rbf = tk.Frame(self.topbar)
+#         rbf.pack(side='right', padx=4)
+#         for lbl, cmd in [('书签', self.open_bookmarks),
+#                           ('目录', self.open_chapters),
+#                           ('打开', self.open_file),
+#                           ('×',   r.destroy)]:
+#             tk.Button(rbf, text=lbl, font=('', 8), relief='flat',
+#                       padx=3, command=cmd).pack(side='left', padx=1)
+
+#         for w in (self.topbar, self.lbl_title):
+#             w.bind('<ButtonPress-1>', self._drag_start)
+#             w.bind('<B1-Motion>',     self._drag_move)
+
+#         # 设置栏（默认隐藏）
+#         self.setbar = tk.Frame(r)
+#         self._build_setbar()
+
+#         # 分隔线
+#         self.sep = tk.Frame(r, height=1)
+#         self.sep.pack(fill='x')
+
+#         # 文本区（先 pack txt_frame，再在内部放 txt 和 vsb）
+#         self.txt_frame = tk.Frame(r)
+#         self.txt_frame.pack(fill='both', expand=True)
+
+#         # 自定义竖向拖拽滚动条（先 pack 到右侧，再 pack txt）
+#         self.vsb = SmoothScrollbar(
+#             self.txt_frame,
+#             on_scroll=lambda frac: self.txt.yview_moveto(frac),
+#         )
+
+#         self.txt = tk.Text(
+#             self.txt_frame, wrap='word',
+#             relief='flat', padx=16, pady=10,
+#             state='disabled', cursor='arrow',
+#             font=(self.font_fam, self.font_size),
+#             borderwidth=0, highlightthickness=0,
+#             spacing1=self.line_spacing,
+#             spacing2=self.line_spacing // 2,
+#             spacing3=self.line_spacing,
+#             yscrollcommand=self._on_yscroll,
+#         )
+#         self.txt.pack(side='left', fill='both', expand=True)
+
+#         self.txt.bind('<Button-1>',   self._on_click)
+#         self.txt.bind('<MouseWheel>', self._on_wheel)
+#         self.txt.bind('<Button-4>',   self._on_wheel)
+#         self.txt.bind('<Button-5>',   self._on_wheel)
+
+#         self._show_welcome()
+
+#         # ── 底部区域（仅导航栏，无横向进度条）──────
+#         self.bot_area = tk.Frame(r)
+#         self.bot_area.pack(fill='x', side='bottom')
+
+#         # 导航栏
+#         self.botbar = tk.Frame(self.bot_area, height=26)
+#         self.botbar.pack(fill='x')
+#         self.botbar.pack_propagate(False)
+
+#         self.btn_prev = tk.Button(self.botbar, text='◀ 上章', font=('', 8),
+#                                   relief='flat', padx=5, command=self.prev_chapter)
+#         self.btn_prev.pack(side='left', padx=6, pady=3)
+
+#         self.lbl_prog = tk.Label(self.botbar, text='', font=('', 8))
+#         self.lbl_prog.pack(side='left', expand=True)
+
+#         # O键提示
+#         tk.Label(self.botbar, text='O=书签', font=('', 7)).pack(side='right', padx=2)
+
+#         self.btn_bm = tk.Button(self.botbar, text='🔖', font=('', 9),
+#                                 relief='flat', padx=2, command=self.add_mark)
+#         self.btn_bm.pack(side='right', padx=2, pady=3)
+
+#         self.btn_next = tk.Button(self.botbar, text='下章 ▶', font=('', 8),
+#                                   relief='flat', padx=5, command=self.next_chapter)
+#         self.btn_next.pack(side='right', padx=6, pady=3)
+
+#     def _dot(self, p, color, cmd):
+#         lb = tk.Label(p, text='⬤', fg=color, font=('', 12), cursor='hand2')
+#         lb.pack(side='left', padx=2)
+#         lb.bind('<Button-1>', lambda e: cmd())
+
+#     def _build_setbar(self):
+#         r1 = tk.Frame(self.setbar); r1.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r1, text='字号', font=('',8)).pack(side='left')
+#         self.sl_font = tk.Scale(r1, from_=10, to=32, orient='horizontal',
+#                                 length=70, showvalue=True, font=('',7),
+#                                 command=self._on_font_size)
+#         self.sl_font.set(self.font_size)
+#         self.sl_font.pack(side='left', padx=2)
+
+#         tk.Label(r1, text='行距', font=('',8)).pack(side='left', padx=(8,0))
+#         self.sl_spacing = tk.Scale(r1, from_=0, to=24, orient='horizontal',
+#                                    length=70, showvalue=True, font=('',7),
+#                                    command=self._on_spacing)
+#         self.sl_spacing.set(self.line_spacing)
+#         self.sl_spacing.pack(side='left', padx=2)
+
+#         r2 = tk.Frame(self.setbar); r2.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r2, text='透明', font=('',8)).pack(side='left')
+#         self.sl_alpha = tk.Scale(r2, from_=20, to=100, orient='horizontal',
+#                                  length=80, showvalue=True, font=('',7),
+#                                  command=lambda v: self.root.attributes('-alpha', int(v)/100))
+#         self.sl_alpha.set(100)
+#         self.sl_alpha.pack(side='left', padx=2)
+
+#         r3 = tk.Frame(self.setbar); r3.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r3, text='字色', font=('',8)).pack(side='left')
+#         self.btn_fg_color = tk.Button(r3, text='  ', relief='groove', width=2,
+#                                       font=('',8), command=self._pick_fg)
+#         self.btn_fg_color.pack(side='left', padx=2)
+
+#         tk.Label(r3, text='背景', font=('',8)).pack(side='left', padx=(6,0))
+#         self.btn_bg_color = tk.Button(r3, text='  ', relief='groove', width=2,
+#                                       font=('',8), command=self._pick_bg)
+#         self.btn_bg_color.pack(side='left', padx=2)
+
+#         tk.Button(r3, text='🎨取色', font=('',8), relief='flat',
+#                   padx=4, command=self._screen_pick).pack(side='left', padx=4)
+#         tk.Button(r3, text='重置', font=('',8), relief='flat',
+#                   padx=4, command=self._reset_colors).pack(side='left', padx=2)
+
+#         r4 = tk.Frame(self.setbar); r4.pack(fill='x', padx=8, pady=2)
+#         tk.Label(r4, text='主题', font=('',8)).pack(side='left')
+#         self.var_theme = tk.StringVar(value=self.theme_name)
+#         cb = ttk.Combobox(r4, textvariable=self.var_theme,
+#                           values=list(self.THEMES.keys()),
+#                           width=7, font=('',8), state='readonly')
+#         cb.pack(side='left', padx=4)
+#         cb.bind('<<ComboboxSelected>>', self._on_theme)
+
+#     # ─────────────────────────────────────────────────
+#     # 颜色 / 主题
+#     # ─────────────────────────────────────────────────
+#     def _pick_fg(self):
+#         t = self._cur_theme()
+#         c = colorchooser.askcolor(color=t['fg'], title='选择字体颜色')
+#         if c and c[1]:
+#             self.THEMES[self.theme_name]['fg'] = c[1]
+#             self.txt.config(fg=c[1])
+#             self.btn_fg_color.config(bg=c[1])
+
+#     def _pick_bg(self):
+#         c = colorchooser.askcolor(color=self._cur_theme()['bg'], title='选择背景颜色')
+#         if c and c[1]: self._apply_custom_bg(c[1])
+
+#     def _screen_pick(self):
+#         alpha = self.sl_alpha.get() / 100
+#         self.root.attributes('-alpha', 0.0)
+#         def on_color(hx):
+#             self.root.after(100, lambda: self.root.attributes('-alpha', alpha))
+#             self._apply_custom_bg(hx)
+#         self.root.after(120, lambda: screen_color_picker(on_color))
+
+#     def _apply_custom_bg(self, hx):
+#         self.custom_bg  = hx
+#         self.custom_bar = self._darken(hx, 0.88)
+#         self._apply_theme()
+#         try: self.btn_bg_color.config(bg=hx)
+#         except: pass
+
+#     def _reset_colors(self):
+#         self.custom_bg = self.custom_bar = None
+#         self._apply_theme()
+
+#     def _darken(self, hx, f=0.88):
+#         h = hx.lstrip('#')
+#         return '#{:02x}{:02x}{:02x}'.format(
+#             int(int(h[0:2],16)*f), int(int(h[2:4],16)*f), int(int(h[4:6],16)*f))
+
+#     def _cur_theme(self):
+#         t = copy.copy(self.THEMES[self.theme_name])
+#         if self.custom_bg:  t['bg']  = self.custom_bg
+#         if self.custom_bar: t['bar'] = self.custom_bar
+#         return t
+
+#     def _on_theme(self, e=None):
+#         self.theme_name = self.var_theme.get()
+#         self.custom_bg = self.custom_bar = None
+#         self._apply_theme()
+
+#     def _apply_theme(self):
+#         t = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+#         self.root.configure(bg=bar)
+#         self._cf(self.topbar, bar, fg)
+#         self._cf(self.botbar, bar, fg)
+#         self._cf(self.bot_area, bar, fg)
+#         self.sep.config(bg=sel)
+#         self.txt_frame.config(bg=bg)
+#         self.vsb.cv.config(bg=bg)
+#         self.vsb.set_colors(bg=bg, track=sel,
+#                             thumb=t.get('thumb', sel),
+#                             thumb_hover=t.get('thumb_h', fg))
+#         self.txt.config(bg=bg, fg=fg, insertbackground=fg, selectbackground=sel)
+#         self.lbl_prog.config(bg=bar, fg=fg)
+#         self.btn_bm.config(bg=bar, fg=fg, activebackground=sel)
+#         for b in (self.btn_prev, self.btn_next):
+#             b.config(bg=bar, fg=fg, activebackground=sel)
+
+#         self._retheme_setbar()
+#         try:
+#             if self.custom_bg: self.btn_bg_color.config(bg=self.custom_bg)
+#         except: pass
+
+#     def _cf(self, fr, bg, fg):
+#         try: fr.config(bg=bg)
+#         except: pass
+#         for w in fr.winfo_children():
+#             try: w.config(bg=bg, fg=fg, activebackground=bg)
+#             except: pass
+#             for w2 in w.winfo_children():
+#                 try: w2.config(bg=bg, fg=fg, activebackground=bg)
+#                 except: pass
+
+#     def _retheme_setbar(self):
+#         t = self._cur_theme()
+#         bg, fg, sel = t['bar'], t['fg'], t['sel']
+#         self._cf(self.setbar, bg, fg)
+#         for sl in (self.sl_font, self.sl_alpha, self.sl_spacing):
+#             try: sl.config(bg=bg, fg=fg, troughcolor=sel, activebackground=sel)
+#             except: pass
+#         try: self.btn_fg_color.config(bg=fg)
+#         except: pass
+
+#     # ─────────────────────────────────────────────────
+#     # 拖动窗口
+#     # ─────────────────────────────────────────────────
+#     def _drag_start(self, e):
+#         self._dx = e.x_root - self.root.winfo_x()
+#         self._dy = e.y_root - self.root.winfo_y()
+
+#     def _drag_move(self, e):
+#         self.root.geometry(f'+{e.x_root-self._dx}+{e.y_root-self._dy}')
+
+#     # ─────────────────────────────────────────────────
+#     # 打开文件
+#     # ─────────────────────────────────────────────────
+#     def open_file(self):
+#         path = filedialog.askopenfilename(
+#             title='打开小说',
+#             filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')]
+#         )
+#         if not path: return
+#         ext = os.path.splitext(path)[1].lower()
+#         if ext == '.epub':
+#             title, text = read_epub(path)
+#         else:
+#             title = os.path.splitext(os.path.basename(path))[0]
+#             try:
+#                 with open(path, encoding='utf-8', errors='replace') as f: text = f.read()
+#             except Exception as e:
+#                 messagebox.showerror('错误', str(e)); return
+
+#         self.book_path  = path
+#         self.book_title = title
+#         self.lbl_title.config(text=f'  {title}')
+#         self.root.title(f'摸鱼阅读器 — {title}')
+#         self._load(text, restore_bm=True)
+
+#     def _load(self, text, restore_bm=False):
+#         self.chapters = split_chapters(text)
+#         self.cur_ch   = 0
+#         bm = self.bookmarks.get(self.book_path, {})
+#         if restore_bm and bm:
+#             # 恢复上次"最近位置"（非标记书签）
+#             saved = bm.get('last_chapter', 0)
+#             self.cur_ch = max(0, min(saved, len(self.chapters)-1))
+#         self._render_chapter()
+
+#     # ─────────────────────────────────────────────────
+#     # 渲染章节
+#     # ─────────────────────────────────────────────────
+#     def _render_chapter(self, scroll_to_top=True):
+#         if not self.chapters: return
+#         self.cur_ch = max(0, min(self.cur_ch, len(self.chapters)-1))
+#         ch = self.chapters[self.cur_ch]
+
+#         self.txt.config(state='normal')
+#         self.txt.delete('1.0', 'end')
+#         self.txt.insert('1.0', ch['body'])
+#         self.txt.config(state='disabled')
+
+#         if scroll_to_top:
+#             self.txt.yview_moveto(0.0)
+
+#         self._update_nav()
+#         self._wheel_accum = 0
+#         # 自动保存"最近位置"书签
+#         self._save_last_position()
+
+#     def _update_nav(self):
+#         n   = len(self.chapters)
+#         idx = self.cur_ch + 1
+#         self.lbl_prog.config(text=f'第 {idx} / {n} 章')
+#         self.btn_prev.config(state='normal' if self.cur_ch > 0   else 'disabled')
+#         self.btn_next.config(state='normal' if self.cur_ch < n-1 else 'disabled')
+
+
+#     def _get_mark_chapters(self):
+#         """返回当前书的所有标记书签的章节索引列表"""
+#         bm = self.bookmarks.get(self.book_path, {})
+#         return [m['chapter'] for m in bm.get('marks', [])]
+
+#     # ─────────────────────────────────────────────────
+#     # 章节切换
+#     # ─────────────────────────────────────────────────
+#     def next_chapter(self):
+#         if self.chapters and self.cur_ch < len(self.chapters)-1:
+#             self.cur_ch += 1
+#             self._render_chapter(scroll_to_top=True)
+
+#     def prev_chapter(self):
+#         if self.chapters and self.cur_ch > 0:
+#             self.cur_ch -= 1
+#             self._render_chapter(scroll_to_top=True)
+
+#     def goto_chapter(self, idx):
+#         if not self.chapters: return
+#         self.cur_ch = max(0, min(idx, len(self.chapters)-1))
+#         self._render_chapter(scroll_to_top=True)
+
+#     # ─────────────────────────────────────────────────
+#     # 点击翻章 / 滚轮
+#     # ─────────────────────────────────────────────────
+#     def _on_yscroll(self, lo, hi):
+#         """Text widget 回调 → 转发给自定义滚动条"""
+#         self.vsb.set(lo, hi)
+
+#     def _on_click(self, e):
+#         w = self.txt.winfo_width()
+#         if   e.x < w * 0.30: self.prev_chapter()
+#         elif e.x > w * 0.70: self.next_chapter()
+
+#     def _on_wheel(self, e):
+#         if e.num == 4:   delta = 1
+#         elif e.num == 5: delta = -1
+#         else:            delta = 1 if e.delta > 0 else -1
+#         top, bot = self.txt.yview()
+#         if delta < 0:
+#             if bot >= 0.999:
+#                 self._wheel_accum -= 1
+#                 if self._wheel_accum <= -3: self.next_chapter(); return
+#             else:
+#                 self._wheel_accum = 0
+#                 self.txt.yview_scroll(3, 'units')
+#         else:
+#             if top <= 0.001:
+#                 self._wheel_accum += 1
+#                 if self._wheel_accum >= 3:
+#                     self.prev_chapter()
+#                     self.root.after(30, lambda: self.txt.yview_moveto(1.0))
+#                     return
+#             else:
+#                 self._wheel_accum = 0
+#                 self.txt.yview_scroll(-3, 'units')
+
+#     def _scroll_down_screen(self):
+#         _, bot = self.txt.yview()
+#         if bot >= 0.999: self.next_chapter()
+#         else:            self.txt.yview_scroll(1, 'pages')
+
+#     # ─────────────────────────────────────────────────
+#     # 书签系统（多标记）
+#     # ─────────────────────────────────────────────────
+#     def _ensure_bm_entry(self):
+#         """确保当前书在 bookmarks 里有条目"""
+#         if self.book_path not in self.bookmarks:
+#             self.bookmarks[self.book_path] = {
+#                 'title': self.book_title,
+#                 'path':  self.book_path,
+#                 'last_chapter': self.cur_ch,
+#                 'marks': [],
+#             }
+
+#     def _save_last_position(self):
+#         """自动保存"最近阅读位置"（不算标记书签）"""
+#         if not self.book_path: return
+#         self._ensure_bm_entry()
+#         self.bookmarks[self.book_path]['last_chapter'] = self.cur_ch
+#         bm_save(self.bookmarks)
+
+#     def add_mark(self, note=''):
+#         """O键 / 🔖按钮：在当前章节添加标记书签"""
+#         if not self.book_path:
+#             messagebox.showinfo('提示', '请先打开一本小说'); return
+#         self._ensure_bm_entry()
+#         ch      = self.chapters[self.cur_ch]
+#         marks   = self.bookmarks[self.book_path]['marks']
+
+#         # 同章节已有书签则更新，否则追加
+#         existing = next((m for m in marks if m['chapter'] == self.cur_ch), None)
+#         entry = {
+#             'chapter':  self.cur_ch,
+#             'ch_title': ch['title'],
+#             'note':     note,
+#         }
+#         if existing:
+#             existing.update(entry)
+#             msg = f'书签已更新\n第 {self.cur_ch+1} 章\n{ch["title"]}'
+#         else:
+#             marks.append(entry)
+#             msg = f'🔖 书签已添加\n第 {self.cur_ch+1} 章\n{ch["title"]}'
+
+#         bm_save(self.bookmarks)
+#         self._update_nav()   # 刷新进度条上的旗子
+
+#         # 顶部短暂提示（不用弹窗打扰）
+#         self._toast(msg)
+
+#     def _toast(self, msg):
+#         """在窗口内弹出短暂提示条，1.5秒后消失"""
+#         t = self._cur_theme()
+#         toast = tk.Label(self.root, text=msg.replace('\n', '  '),
+#                          font=('', 8), bg=t.get('fill', t['bar']),
+#                          fg=t['bg'], padx=8, pady=3, relief='flat')
+#         toast.place(relx=0.5, rely=0.08, anchor='n')
+#         self.root.after(1500, toast.destroy)
+
+#     def open_bookmarks(self):
+#         bm = self.bookmarks.get(self.book_path, {})
+#         marks = bm.get('marks', [])
+
+#         # 如果没书，显示所有书的"最近位置"
+#         all_books = {k: v for k, v in self.bookmarks.items()}
+#         if not all_books:
+#             messagebox.showinfo('书签', '暂无书签'); return
+
+#         t  = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+#         win = tk.Toplevel(self.root)
+#         win.title('书签管理')
+#         win.geometry('340x400')
+#         win.resizable(True, True)
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+
+#         hdr = tk.Frame(win, bg=bar, height=28)
+#         hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr, text='🔖 书签管理', font=('',9,'bold'),
+#                  bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
+#         tk.Button(hdr, text='×', relief='flat', font=('',10),
+#                   bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+#         # Tab：本书书签 / 所有书
+#         nb = ttk.Notebook(win)
+#         nb.pack(fill='both', expand=True, padx=4, pady=4)
+
+#         def make_tab(parent, rows, jump_fn, del_fn):
+#             """rows: [(display_str, data_obj)]"""
+#             f = tk.Frame(parent, bg=bg)
+#             sb2 = tk.Scrollbar(f); sb2.pack(side='right', fill='y')
+#             lb = tk.Listbox(f, font=('',10), relief='flat', bg=bg, fg=fg,
+#                             selectbackground=sel, selectforeground=fg,
+#                             borderwidth=0, highlightthickness=0,
+#                             activestyle='none', yscrollcommand=sb2.set)
+#             lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+#             for txt, _ in rows:
+#                 lb.insert('end', txt)
+#             bf = tk.Frame(f, bg=bar); bf.pack(fill='x', pady=2)
+#             def _jump():
+#                 idxs = lb.curselection()
+#                 if idxs: jump_fn(rows[idxs[0]][1])
+#             def _del():
+#                 idxs = lb.curselection()
+#                 if idxs:
+#                     del_fn(rows[idxs[0]][1])
+#                     lb.delete(idxs[0])
+#                     rows.pop(idxs[0])
+#             tk.Button(bf, text='跳转', font=('',9), bg=bar, fg=fg,
+#                       relief='flat', padx=8, command=_jump).pack(side='left', padx=4)
+#             tk.Button(bf, text='删除', font=('',9), bg=bar, fg=fg,
+#                       relief='flat', padx=8, command=_del).pack(side='left')
+#             lb.bind('<Double-Button-1>', lambda e: _jump())
+#             return f
+
+#         # ── 本书标记书签 tab ──────────────────────────
+#         mark_rows = []
+#         for m in marks:
+#             s = f"  🏴 第{m['chapter']+1}章  {m['ch_title']}"
+#             if m.get('note'): s += f"  —  {m['note']}"
+#             mark_rows.append((s, m))
+
+#         def jump_mark(m):
+#             win.destroy()
+#             self.goto_chapter(m['chapter'])
+
+#         def del_mark(m):
+#             bm2 = self.bookmarks.get(self.book_path, {})
+#             bm2['marks'] = [x for x in bm2.get('marks',[]) if x is not m]
+#             bm_save(self.bookmarks)
+#             self._update_nav()
+
+#         tab1 = make_tab(nb, mark_rows, jump_mark, del_mark)
+#         nb.add(tab1, text=f'本书书签 ({len(mark_rows)})')
+
+#         # ── 所有书最近位置 tab ────────────────────────
+#         book_rows = []
+#         for k, v in all_books.items():
+#             lc  = v.get('last_chapter', 0)
+#             tot = v.get('total_chapters', '?')
+#             s   = f"  📖 {v.get('title','?')}  第{lc+1}章"
+#             book_rows.append((s, v))
+
+#         def jump_book(v):
+#             win.destroy()
+#             path = v.get('path','')
+#             if not path: return
+#             if path == self.book_path:
+#                 self.goto_chapter(v.get('last_chapter', 0))
+#             else:
+#                 ext = os.path.splitext(path)[1].lower()
+#                 try:
+#                     if ext == '.epub': title2, text2 = read_epub(path)
+#                     else:
+#                         with open(path, encoding='utf-8', errors='replace') as f: text2=f.read()
+#                         title2 = v.get('title', os.path.basename(path))
+#                 except:
+#                     messagebox.showerror('错误','文件不存在或已移动'); return
+#                 self.book_path = path; self.book_title = title2
+#                 self.lbl_title.config(text=f'  {title2}')
+#                 self.root.title(f'摸鱼阅读器 — {title2}')
+#                 self.chapters = split_chapters(text2)
+#                 self.goto_chapter(v.get('last_chapter', 0))
+
+#         def del_book(v):
+#             k = v.get('path','')
+#             if k in self.bookmarks:
+#                 del self.bookmarks[k]
+#                 bm_save(self.bookmarks)
+
+#         tab2 = make_tab(nb, book_rows, jump_book, del_book)
+#         nb.add(tab2, text=f'所有书籍 ({len(book_rows)})')
+
+#         rx = self.root.winfo_x() + self.root.winfo_width() + 8
+#         ry = self.root.winfo_y()
+#         win.geometry(f'340x400+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 欢迎页
+#     # ─────────────────────────────────────────────────
+#     def _show_welcome(self):
+#         self.txt.config(state='normal')
+#         self.txt.delete('1.0','end')
+#         self.txt.insert('1.0', (
+#             '\n\n\n\n'
+#             '       📚  摸鱼阅读器\n\n'
+#             '  支持：TXT  /  EPUB  /  MD\n\n'
+#             '  ● 右上角 [打开] 选择文件\n'
+#             '  ● 绿色圆点 快速打开\n\n'
+#             '  操作方式：\n'
+#             '    滚轮          章内上下滚动\n'
+#             '    滚到底/顶     自动切换章节\n'
+#             '    点击左侧 30%  上一章\n'
+#             '    点击右侧 30%  下一章\n'
+#             '    拖拽底部进度条 快速定位章节\n'
+#             '    S / ↓         向下翻一屏\n'
+#             '    ← / →         切换章节\n'
+#             '    O             添加书签标记\n'
+#             '    D + E         最小化\n'
+#         ))
+#         self.txt.config(state='disabled')
+
+#     # ─────────────────────────────────────────────────
+#     # 最小化
+#     # ─────────────────────────────────────────────────
+#     def toggle_minimize(self):
+#         self._minimized = not self._minimized
+#         if self._minimized:
+#             self._saved_h = self.root.winfo_height()
+#             for w in (self.setbar, self.sep, self.txt_frame, self.bot_area):
+#                 w.pack_forget()
+#             self.root.geometry(f'{self.root.winfo_width()}x30')
+#         else:
+#             self.root.geometry(f'{self.root.winfo_width()}x{self._saved_h}')
+#             self.sep.pack(fill='x', after=self.topbar)
+#             if self._settings_open:
+#                 self.setbar.pack(fill='x', after=self.topbar)
+#                 self._retheme_setbar()
+#             self.txt_frame.pack(fill='both', expand=True)
+#             self.bot_area.pack(fill='x', side='bottom')
+
+#     def toggle_settings(self):
+#         self._settings_open = not self._settings_open
+#         if self._settings_open:
+#             self.setbar.pack(fill='x', after=self.topbar)
+#             self._retheme_setbar()
+#         else:
+#             self.setbar.pack_forget()
+
+#     def _on_font_size(self, val):
+#         self.font_size = int(float(val))
+#         self.txt.config(font=(self.font_fam, self.font_size))
+
+#     def _on_spacing(self, val):
+#         sp = int(float(val))
+#         self.line_spacing = sp
+#         self.txt.config(spacing1=sp, spacing2=sp//2, spacing3=sp)
+
+#     # ─────────────────────────────────────────────────
+#     # 章节目录
+#     # ─────────────────────────────────────────────────
+#     def open_chapters(self):
+#         if not self.chapters:
+#             messagebox.showinfo('提示','请先打开一本小说'); return
+
+#         t  = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+#         marks_set = set(self._get_mark_chapters())
+
+#         win = tk.Toplevel(self.root)
+#         win.title('章节目录')
+#         win.geometry('300x480')
+#         win.resizable(True, True)
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+
+#         hdr = tk.Frame(win, bg=bar, height=28)
+#         hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr, text='📑 章节目录', font=('',9,'bold'),
+#                  bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
+#         tk.Button(hdr, text='×', relief='flat', font=('',10),
+#                   bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+#         sf = tk.Frame(win, bg=bg); sf.pack(fill='x', padx=6, pady=(6,2))
+#         sv = tk.StringVar()
+#         se = tk.Entry(sf, textvariable=sv, font=('',9), bg=bg, fg=fg,
+#                       insertbackground=fg, relief='groove')
+#         se.pack(fill='x', ipady=3)
+#         PH = '搜索章节名...'
+#         se.insert(0, PH); se.config(fg='gray')
+#         se.bind('<FocusIn>',  lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
+#         se.bind('<FocusOut>', lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
+
+#         lf = tk.Frame(win, bg=bg); lf.pack(fill='both', expand=True, padx=4, pady=4)
+#         sb2 = tk.Scrollbar(lf); sb2.pack(side='right', fill='y')
+#         lb = tk.Listbox(lf, font=('',10), relief='flat', bg=bg, fg=fg,
+#                         selectbackground=sel, selectforeground=fg,
+#                         borderwidth=0, highlightthickness=0,
+#                         activestyle='none', yscrollcommand=sb2.set)
+#         lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+
+#         btn_j = tk.Button(win, text='↩  跳转到选中章节', font=('',9,'bold'),
+#                           bg=bar, fg=fg, relief='flat', pady=5)
+#         btn_j.pack(fill='x', padx=6, pady=4)
+
+#         all_ch  = list(self.chapters)
+#         visible = list(range(len(all_ch)))
+
+#         def fill(indices):
+#             visible.clear(); visible.extend(indices)
+#             lb.delete(0,'end')
+#             for i in indices:
+#                 flag = ' 🏴' if i in marks_set else ''
+#                 lb.insert('end', f'  {i+1}. {all_ch[i]["title"]}{flag}')
+
+#         fill(range(len(all_ch)))
+#         try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
+#         except: pass
+
+#         def on_search(*_):
+#             q = sv.get().strip()
+#             fill(range(len(all_ch))) if q in ('',PH) else \
+#             fill([i for i,c in enumerate(all_ch) if q in c['title']])
+#         sv.trace_add('write', on_search)
+
+#         def jump(event=None):
+#             idxs = lb.curselection()
+#             if not idxs: return
+#             win.destroy()
+#             self.goto_chapter(visible[idxs[0]])
+
+#         btn_j.config(command=jump)
+#         lb.bind('<Double-Button-1>', jump)
+#         lb.bind('<Return>', jump)
+
+#         rx = self.root.winfo_x() + self.root.winfo_width() + 8
+#         ry = self.root.winfo_y()
+#         win.geometry(f'300x480+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 快捷键
+#     # ─────────────────────────────────────────────────
+#     def _bind_keys(self):
+#         r = self.root
+#         r.bind('<KeyPress-s>',   lambda e: self._scroll_down_screen())
+#         r.bind('<KeyPress-S>',   lambda e: self._scroll_down_screen())
+#         r.bind('<Right>',        lambda e: self.next_chapter())
+#         r.bind('<Left>',         lambda e: self.prev_chapter())
+#         r.bind('<Down>',         lambda e: self._scroll_down_screen())
+#         r.bind('<Up>',           lambda e: self.txt.yview_scroll(-3,'units'))
+#         r.bind('<KeyPress-o>',   lambda e: self.add_mark())
+#         r.bind('<KeyPress-O>',   lambda e: self.add_mark())
+#         r.bind('<KeyPress-d>',   self._dp)
+#         r.bind('<KeyPress-D>',   self._dp)
+#         r.bind('<KeyRelease-d>', self._dr)
+#         r.bind('<KeyRelease-D>', self._dr)
+#         r.bind('<KeyPress-e>',   self._ep)
+#         r.bind('<KeyPress-E>',   self._ep)
+#         r.focus_set()
+
+#     def _dp(self, e): self._d_held = True
+#     def _dr(self, e): self._d_held = False
+#     def _ep(self, e):
+#         if self._d_held: self.toggle_minimize()
+
+
+# # ══════════════════════════════════════════════════════════════
+# if __name__ == '__main__':
+#     try:
+#         from ctypes import windll
+#         windll.shcore.SetProcessDpiAwareness(1)
+#     except: pass
+#     App()
+
+
 """
-摸鱼阅读器 v6.0  —  章节滚动模式
-  · 每章完整显示，鼠标滚轮在章内自由滚动
-  · 点击文字区左侧 38% → 上一章
-  · 点击文字区右侧 62% → 下一章
-  · 底部 ◀ ▶ 按钮 / ← → 键 切换章节
-  · S 键滚动到下一屏
+摸鱼阅读器 v8.0  —  全功能版
+功能：
+  阅读体验：章节滚动、翻页、字号/行距/字色/背景/护眼模式、透明度、屏幕取色
+  书架管理：添加/删除/重命名书籍、显示封面/进度/上次阅读时间
+  阅读进度：自动记录、书架显示进度条
+  笔记系统：N键在当前章节创建笔记、查看/编辑/删除笔记
+  书签系统：O键快速书签、书签列表跳转删除
+  听书TTS ：F5启动/停止，支持语速调整（需系统 pyttsx3 或 espeak）
+  竖向拖拽滚动条、目录跳转、搜索
+
 运行：python novel_reader.py
-打包：pip install pyinstaller
-      pyinstaller --onefile --windowed --name 摸鱼阅读器 novel_reader.py
-屏幕取色需要 Pillow：pip install pillow
+依赖：pip install pyttsx3   （TTS，可选）
+      pip install pillow     （屏幕取色，可选）
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, colorchooser, messagebox
-import os, re, zipfile, sys, json
+from tkinter import ttk, filedialog, colorchooser, messagebox, scrolledtext
+import os, re, zipfile, sys, json, copy, threading, time, datetime
 from html.parser import HTMLParser
 
 
@@ -24,19 +2098,16 @@ class _H2T(HTMLParser):
     SKIP  = {'script','style','head','meta','link'}
     BLOCK = {'p','div','br','h1','h2','h3','h4','h5',
              'h6','li','tr','td','th','section','article'}
-    def __init__(self):
-        super().__init__()
-        self.out, self._s = [], 0
+    def __init__(self): super().__init__(); self.out, self._s = [], 0
     def handle_starttag(self, tag, _):
         if tag in self.SKIP:  self._s += 1
         if tag in self.BLOCK: self.out.append('\n')
     def handle_endtag(self, tag):
-        if tag in self.SKIP:  self._s = max(0, self._s - 1)
+        if tag in self.SKIP:  self._s = max(0, self._s-1)
         if tag in self.BLOCK: self.out.append('\n')
     def handle_data(self, d):
         if not self._s: self.out.append(d)
-    def text(self):
-        return re.sub(r'\n{3,}', '\n\n', ''.join(self.out)).strip()
+    def text(self): return re.sub(r'\n{3,}','\n\n',''.join(self.out)).strip()
 
 def html2text(s):
     p = _H2T()
@@ -59,35 +2130,28 @@ def read_epub(path):
             if 'META-INF/container.xml' in ns:
                 for el in ET.fromstring(z.read('META-INF/container.xml')).iter():
                     if el.tag.endswith('rootfile'):
-                        opf  = el.get('full-path', '')
-                        odir = opf.rsplit('/', 1)[0] if '/' in opf else ''
-                        break
+                        opf = el.get('full-path',''); odir = opf.rsplit('/',1)[0] if '/' in opf else ''; break
             items, spine = {}, []
             if opf and opf in ns:
                 root = ET.fromstring(z.read(opf))
                 for el in root.iter():
                     tag = el.tag.split('}')[-1]
                     if tag == 'item':
-                        mid  = el.get('id','')
-                        href = el.get('href','')
-                        mt   = el.get('media-type','')
+                        mid,href,mt = el.get('id',''),el.get('href',''),el.get('media-type','')
                         if href and ('html' in mt or href.endswith(('.html','.xhtml','.htm'))):
                             items[mid] = (odir+'/'+href).lstrip('/') if odir else href
                     elif tag == 'itemref':
                         r = el.get('idref','')
                         if r in items: spine.append(items[r])
-                    elif tag == 'title' and el.text:
-                        title = el.text
+                    elif tag == 'title' and el.text: title = el.text
             if not spine:
-                spine = sorted(f for f in ns
-                               if re.search(r'\.(html|htm|xhtml)$', f, re.I)
+                spine = sorted(f for f in ns if re.search(r'\.(html|htm|xhtml)$',f,re.I)
                                and 'toc' not in f.lower() and 'nav' not in f.lower())
             for href in spine:
                 if href in ns:
                     try: body += html2text(z.read(href).decode('utf-8','replace')) + '\n\n'
                     except: pass
-    except Exception as e:
-        body = f'[EPUB解析失败: {e}]'
+    except Exception as e: body = f'[EPUB解析失败: {e}]'
     return title, body.strip()
 
 
@@ -96,140 +2160,227 @@ def read_epub(path):
 # ══════════════════════════════════════════════════════════════
 _CH = re.compile(
     r'^(第\s*[零一二三四五六七八九十百千万\d〇]+\s*[章节卷集回部篇][^\n]{0,40}'
-    r'|Chapter\s*\d+[^\n]{0,40}'
-    r'|CHAPTER\s*\d+[^\n]{0,40}'
-    r'|【[^\n]{1,30}】)', re.I)
+    r'|Chapter\s*\d+[^\n]{0,40}|CHAPTER\s*\d+[^\n]{0,40}|【[^\n]{1,30}】)', re.I)
 
 def split_chapters(text):
-    """
-    把全文按章节标题切割，返回 [{'title':str, 'body':str}]
-    若无章节标题，整本作为一章。
-    """
-    boundaries = []   # (char_pos, title)
+    bounds = []
     for m in re.finditer(r'^.+$', text, re.M):
         line = m.group().strip()
-        if line and _CH.match(line):
-            boundaries.append((m.start(), line))
-
-    if not boundaries:
-        return [{'title': '全文', 'body': text}]
-
-    chapters = []
-    for i, (pos, title) in enumerate(boundaries):
-        end = boundaries[i+1][0] if i+1 < len(boundaries) else len(text)
-        chapters.append({'title': title, 'body': text[pos:end]})
-    return chapters
+        if line and _CH.match(line): bounds.append((m.start(), line))
+    if not bounds: return [{'title':'全文','body':text}]
+    chs = []
+    for i,(pos,title) in enumerate(bounds):
+        end = bounds[i+1][0] if i+1<len(bounds) else len(text)
+        chs.append({'title':title,'body':text[pos:end]})
+    return chs
 
 
 # ══════════════════════════════════════════════════════════════
-# 书签
+# 数据存储
 # ══════════════════════════════════════════════════════════════
-BM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        '.moyu_bookmarks.json')
+DATA_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.moyu_data')
+os.makedirs(DATA_DIR, exist_ok=True)
+SHELF_FILE = os.path.join(DATA_DIR, 'shelf.json')
+NOTES_FILE = os.path.join(DATA_DIR, 'notes.json')
+MARKS_FILE = os.path.join(DATA_DIR, 'marks.json')
 
-def bm_load():
+def _jload(f):
     try:
-        with open(BM_FILE, encoding='utf-8') as f: return json.load(f)
+        with open(f, encoding='utf-8') as fp: return json.load(fp)
     except: return {}
 
-def bm_save(d):
+def _jsave(f, d):
     try:
-        with open(BM_FILE, 'w', encoding='utf-8') as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
+        with open(f, 'w', encoding='utf-8') as fp: json.dump(d, fp, ensure_ascii=False, indent=2)
     except: pass
+
+
+# ══════════════════════════════════════════════════════════════
+# TTS 引擎（可选）
+# ══════════════════════════════════════════════════════════════
+class TTS:
+    def __init__(self):
+        self._engine = None
+        self._thread = None
+        self._stop   = threading.Event()
+        self._text   = ''
+        self._rate   = 180
+        self._avail  = False
+        self._init()
+
+    def _init(self):
+        try:
+            import pyttsx3
+            self._engine = pyttsx3.init()
+            self._avail  = True
+        except:
+            self._avail = False
+
+    @property
+    def available(self): return self._avail
+
+    def set_rate(self, rate):
+        self._rate = int(rate)
+        if self._engine:
+            try: self._engine.setProperty('rate', self._rate)
+            except: pass
+
+    def speak(self, text, on_done=None):
+        if not self._avail: return
+        self.stop()
+        self._stop.clear()
+        self._text = text
+
+        def run():
+            try:
+                import pyttsx3
+                eng = pyttsx3.init()
+                eng.setProperty('rate', self._rate)
+                # 逐段朗读，支持中途停止
+                paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+                for para in paragraphs:
+                    if self._stop.is_set(): break
+                    eng.say(para)
+                    eng.runAndWait()
+                eng.stop()
+            except: pass
+            if on_done: on_done()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._engine:
+            try: self._engine.stop()
+            except: pass
 
 
 # ══════════════════════════════════════════════════════════════
 # 屏幕取色器
 # ══════════════════════════════════════════════════════════════
 def screen_color_picker(callback):
-    try:
-        from PIL import ImageGrab
+    try: from PIL import ImageGrab
     except ImportError:
         c = colorchooser.askcolor(title='选择颜色')
         if c and c[1]: callback(c[1])
         return
-
     from PIL import ImageGrab, Image, ImageTk
-
-    ZOOM = 10
-    HALF = 5
-    CS   = (HALF*2+1) * ZOOM   # canvas size = 110
-
-    preview = tk.Toplevel()
-    preview.overrideredirect(True)
-    preview.attributes('-topmost', True)
-    preview.configure(bg='#1a1a1a')
+    ZOOM,HALF = 10,5; CS = (HALF*2+1)*ZOOM
+    preview = tk.Toplevel(); preview.overrideredirect(True)
+    preview.attributes('-topmost',True); preview.configure(bg='#1a1a1a')
     preview.geometry(f'{CS+4}x{CS+28}+200+200')
-
-    canvas = tk.Canvas(preview, width=CS, height=CS, bg='#000',
-                       highlightthickness=1, highlightbackground='#555',
-                       cursor='none')
-    canvas.pack(padx=2, pady=(2,0))
-    lbl = tk.Label(preview, text='#000000', font=('Consolas',9,'bold'),
-                   bg='#1a1a1a', fg='white', pady=1)
+    canvas = tk.Canvas(preview,width=CS,height=CS,bg='#000',highlightthickness=1,
+                       highlightbackground='#555',cursor='none')
+    canvas.pack(padx=2,pady=(2,0))
+    lbl = tk.Label(preview,text='#000000',font=('Consolas',9,'bold'),bg='#1a1a1a',fg='white',pady=1)
     lbl.pack()
-
-    cur  = ['#000000']
-    ph   = [None]
-    aid  = [None]
-    done = [False]
-
+    cur,ph,aid,done = ['#000000'],[None],[None],[False]
     def update():
         if done[0]: return
         try:
-            mx, my = preview.winfo_pointerx(), preview.winfo_pointery()
-            box = (mx-HALF, my-HALF, mx+HALF+1, my+HALF+1)
-            img    = ImageGrab.grab(bbox=box)
-            zoomed = img.resize((CS, CS), Image.NEAREST)
-            ph[0]  = ImageTk.PhotoImage(zoomed)
-            canvas.delete('all')
-            canvas.create_image(0, 0, anchor='nw', image=ph[0])
-            c2 = CS // 2
-            canvas.create_line(c2, 0, c2, CS, fill='white', width=1)
-            canvas.create_line(0, c2, CS, c2, fill='white', width=1)
-            canvas.create_rectangle(c2-ZOOM, c2-ZOOM, c2+ZOOM, c2+ZOOM,
-                                     outline='white', width=2)
-            px = img.getpixel((HALF, HALF))
-            hx = '#{:02x}{:02x}{:02x}'.format(px[0], px[1], px[2])
-            cur[0] = hx
-            lbl.config(text=hx)
-            sw, sh = preview.winfo_screenwidth(), preview.winfo_screenheight()
-            ox, oy = mx+18, my+18
-            if ox+CS+10 > sw: ox = mx-CS-22
-            if oy+CS+32 > sh: oy = my-CS-34
+            mx,my = preview.winfo_pointerx(),preview.winfo_pointery()
+            img = ImageGrab.grab(bbox=(mx-HALF,my-HALF,mx+HALF+1,my+HALF+1))
+            zoomed = img.resize((CS,CS),Image.NEAREST); ph[0]=ImageTk.PhotoImage(zoomed)
+            canvas.delete('all'); canvas.create_image(0,0,anchor='nw',image=ph[0])
+            c2=CS//2
+            canvas.create_line(c2,0,c2,CS,fill='white',width=1)
+            canvas.create_line(0,c2,CS,c2,fill='white',width=1)
+            canvas.create_rectangle(c2-ZOOM,c2-ZOOM,c2+ZOOM,c2+ZOOM,outline='white',width=2)
+            px=img.getpixel((HALF,HALF)); hx='#{:02x}{:02x}{:02x}'.format(px[0],px[1],px[2])
+            cur[0]=hx; lbl.config(text=hx)
+            sw,sh=preview.winfo_screenwidth(),preview.winfo_screenheight()
+            ox,oy=mx+18,my+18
+            if ox+CS+10>sw: ox=mx-CS-22
+            if oy+CS+32>sh: oy=my-CS-34
             preview.geometry(f'+{ox}+{oy}')
         except: pass
-        aid[0] = preview.after(40, update)
-
+        aid[0]=preview.after(40,update)
     def finish():
-        done[0] = True
+        done[0]=True
         if aid[0]:
             try: preview.after_cancel(aid[0])
             except: pass
-        for w in (overlay, preview):
+        for w in (overlay,preview):
             try: w.destroy()
             except: pass
+    overlay = tk.Toplevel(); overlay.overrideredirect(True)
+    overlay.attributes('-topmost',True); overlay.attributes('-alpha',0.01)
+    sw,sh=overlay.winfo_screenwidth(),overlay.winfo_screenheight()
+    overlay.geometry(f'{sw}x{sh}+0+0'); overlay.configure(bg='white',cursor='crosshair')
+    overlay.bind('<Button-1>',lambda e:(finish(),callback(cur[0])))
+    overlay.bind('<Escape>',lambda e:finish())
+    overlay.focus_force(); aid[0]=preview.after(40,update)
 
-    def on_pick(e):
-        color = cur[0]; finish(); callback(color)
 
-    def on_cancel(e=None):
-        finish()
+# ══════════════════════════════════════════════════════════════
+# 自定义竖向滚动条
+# ══════════════════════════════════════════════════════════════
+class SmoothScrollbar:
+    W = 10
+    def __init__(self, parent, on_scroll):
+        self.on_scroll = on_scroll
+        self._lo,self._hi = 0.0,1.0
+        self._dragging = False; self._drag_start_y = 0; self._drag_start_lo = 0.0
+        self.c_bg='#ebdbb2'; self.c_track='#d5c4a1'; self.c_thumb='#b8a882'; self.c_hover='#8f7a55'
+        self.cv = tk.Canvas(parent, width=self.W, highlightthickness=0, cursor='arrow')
+        self.cv.pack(side='right', fill='y')
+        self.cv.bind('<Configure>', lambda e: self._draw())
+        self.cv.bind('<ButtonPress-1>',   self._press)
+        self.cv.bind('<B1-Motion>',       self._drag)
+        self.cv.bind('<ButtonRelease-1>', self._release)
+        self.cv.bind('<Enter>', lambda e: self._hover(True))
+        self.cv.bind('<Leave>', lambda e: self._hover(False))
+        self._hovered = False
 
-    overlay = tk.Toplevel()
-    overlay.overrideredirect(True)
-    overlay.attributes('-topmost', True)
-    overlay.attributes('-alpha', 0.01)
-    sw = overlay.winfo_screenwidth()
-    sh = overlay.winfo_screenheight()
-    overlay.geometry(f'{sw}x{sh}+0+0')
-    overlay.configure(bg='white', cursor='crosshair')
-    overlay.bind('<Button-1>', on_pick)
-    overlay.bind('<Escape>',   on_cancel)
-    overlay.focus_force()
+    def set(self, lo, hi): self._lo,self._hi = float(lo),float(hi); self._draw()
 
-    aid[0] = preview.after(40, update)
+    def set_colors(self, bg, track, thumb, thumb_hover):
+        self.c_bg=bg; self.c_track=track; self.c_thumb=thumb; self.c_hover=thumb_hover; self._draw()
+
+    def _draw(self):
+        cv=self.cv; W=self.W; H=cv.winfo_height()
+        if H<4: return
+        cv.delete('all'); PAD=2
+        cv.create_rectangle(0,0,W,H,fill=self.c_bg,outline='')
+        tx=W//2
+        cv.create_line(tx,PAD,tx,H-PAD,fill=self.c_track,width=W-4,capstyle='round')
+        th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+        ty2=min(H-PAD,ty+th); color=self.c_hover if self._hovered else self.c_thumb
+        r=(W-4)//2; x1,x2=2,W-2; y1,y2=ty,ty2
+        if y2-y1>=2*r:
+            cv.create_rectangle(x1,y1+r,x2,y2-r,fill=color,outline='')
+            cv.create_oval(x1,y1,x2,y1+2*r,fill=color,outline='')
+            cv.create_oval(x1,y2-2*r,x2,y2,fill=color,outline='')
+        else: cv.create_oval(x1,y1,x2,y2,fill=color,outline='')
+
+    def _hover(self, v): self._hovered=v; self._draw()
+
+    def _y_to_frac(self,y):
+        H=self.cv.winfo_height(); PAD=2
+        return max(0.0,min(1.0,(y-PAD)/max(1,H-2*PAD)))
+
+    def _thumb_range(self):
+        H=self.cv.winfo_height(); PAD=2
+        th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+        return ty,ty+th
+
+    def _press(self, e):
+        ty1,ty2=self._thumb_range()
+        if ty1<=e.y<=ty2:
+            self._dragging=True; self._drag_start_y=e.y; self._drag_start_lo=self._lo
+        else:
+            frac=self._y_to_frac(e.y); span=self._hi-self._lo
+            self.on_scroll(max(0.0,min(1.0-span,frac-span/2)))
+
+    def _drag(self, e):
+        if not self._dragging: return
+        H=self.cv.winfo_height(); PAD=2; dy=e.y-self._drag_start_y
+        delta=dy/max(1,H-2*PAD); span=self._hi-self._lo
+        target=max(0.0,min(1.0-span,self._drag_start_lo+delta))
+        self._lo=target; self._hi=target+span; self._draw(); self.on_scroll(target)
+
+    def _release(self, e): self._dragging=False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -238,26 +2389,29 @@ def screen_color_picker(callback):
 class App:
 
     THEMES = {
-        '暖黄': dict(bg='#fdf6e3', fg='#3c3836', bar='#ebdbb2', sel='#d5c4a1'),
-        '夜间': dict(bg='#1e1e2e', fg='#cdd6f4', bar='#181825', sel='#313244'),
-        '护眼': dict(bg='#1a2f1a', fg='#a8d5a2', bar='#152315', sel='#2d5a2d'),
-        '纸张': dict(bg='#f5f0e8', fg='#2c2416', bar='#ede4d0', sel='#c8b89a'),
-        '白底': dict(bg='#ffffff', fg='#1a1a1a', bar='#f0f0f0', sel='#dddddd'),
+        '暖黄': dict(bg='#fdf6e3',fg='#3c3836',bar='#ebdbb2',sel='#d5c4a1',thumb='#b8a882',thumb_h='#8f7a55'),
+        '夜间': dict(bg='#1e1e2e',fg='#cdd6f4',bar='#181825',sel='#313244',thumb='#45475a',thumb_h='#6c7086'),
+        '护眼': dict(bg='#1a2f1a',fg='#a8d5a2',bar='#152315',sel='#2d5a2d',thumb='#3a6b3a',thumb_h='#57c454'),
+        '纸张': dict(bg='#f5f0e8',fg='#2c2416',bar='#ede4d0',sel='#c8b89a',thumb='#c8a882',thumb_h='#8b6045'),
+        '白底': dict(bg='#ffffff',fg='#1a1a1a',bar='#f0f0f0',sel='#dddddd',thumb='#bbbbbb',thumb_h='#888888'),
     }
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('摸鱼阅读器')
-        self.root.geometry('420x560')
-        self.root.minsize(300, 340)
+        self.root.geometry('440x600')
+        self.root.minsize(320, 400)
         self.root.attributes('-topmost', True)
 
-        # 书籍数据
-        self.book_path   = ''
-        self.book_title  = ''
-        self.chapters    = []    # [{'title':str, 'body':str}]
-        self.cur_ch      = 0    # 当前章节索引
-        self.bookmarks   = bm_load()
+        # 数据
+        self.shelf   = _jload(SHELF_FILE)   # {path: {title,last_ch,total_ch,last_time,read_time}}
+        self.notes   = _jload(NOTES_FILE)   # {path: [{ch,title,content,time}]}
+        self.marks   = _jload(MARKS_FILE)   # {path: [{ch,ch_title,time}]}
+
+        self.book_path  = ''
+        self.book_title = ''
+        self.chapters   = []
+        self.cur_ch     = 0
 
         # UI 状态
         self.theme_name     = '暖黄'
@@ -265,18 +2419,21 @@ class App:
         self.custom_bar     = None
         self.font_size      = 14
         self.line_spacing   = 6
-        self.font_fam       = ('宋体' if sys.platform == 'win32'
-                               else 'Songti SC' if sys.platform == 'darwin'
+        self.font_fam       = ('宋体' if sys.platform=='win32'
+                               else 'Songti SC' if sys.platform=='darwin'
                                else 'Noto Serif CJK SC')
         self._d_held        = False
         self._minimized     = False
         self._settings_open = False
-        # 滚轮累计，用于判断翻章节
         self._wheel_accum   = 0
+        self._tts_playing   = False
+
+        self.tts = TTS()
 
         self._build_ui()
         self._apply_theme()
         self._bind_keys()
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.root.mainloop()
 
     # ─────────────────────────────────────────────────
@@ -296,23 +2453,22 @@ class App:
         self._dot(dots, '#ffbd2e', self.toggle_settings)
         self._dot(dots, '#28ca41', self.open_file)
 
-        self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('', 9))
+        self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('',9))
         self.lbl_title.pack(side='left', fill='x', expand=True)
 
-        rbf = tk.Frame(self.topbar)
-        rbf.pack(side='right', padx=4)
-        for lbl, cmd in [('书签', self.open_bookmarks),
-                          ('目录', self.open_chapters),
-                          ('打开', self.open_file),
-                          ('×',   r.destroy)]:
-            tk.Button(rbf, text=lbl, font=('', 8), relief='flat',
-                      padx=3, command=cmd).pack(side='left', padx=1)
+        rbf = tk.Frame(self.topbar); rbf.pack(side='right', padx=2)
+        self._tbtn(rbf, '书架', self.open_shelf)
+        self._tbtn(rbf, '目录', self.open_chapters)
+        self._tbtn(rbf, '笔记', self.open_notes)
+        self._tbtn(rbf, '书签', self.open_marks)
+        self._tbtn(rbf, '打开', self.open_file)
+        self._tbtn(rbf, '×',   r.destroy)
 
         for w in (self.topbar, self.lbl_title):
             w.bind('<ButtonPress-1>', self._drag_start)
             w.bind('<B1-Motion>',     self._drag_move)
 
-        # 设置栏（默认隐藏）
+        # 设置栏
         self.setbar = tk.Frame(r)
         self._build_setbar()
 
@@ -320,13 +2476,12 @@ class App:
         self.sep = tk.Frame(r, height=1)
         self.sep.pack(fill='x')
 
-        # ── 文本区（带滚动条）─────────────────────────
+        # 文本区
         self.txt_frame = tk.Frame(r)
         self.txt_frame.pack(fill='both', expand=True)
 
-        # 竖向滚动条（细，紧贴右边）
-        self.vsb = tk.Scrollbar(self.txt_frame, orient='vertical', width=6)
-        self.vsb.pack(side='right', fill='y')
+        self.vsb = SmoothScrollbar(self.txt_frame,
+                                   on_scroll=lambda f: self.txt.yview_moveto(f))
 
         self.txt = tk.Text(
             self.txt_frame, wrap='word',
@@ -335,352 +2490,632 @@ class App:
             font=(self.font_fam, self.font_size),
             borderwidth=0, highlightthickness=0,
             spacing1=self.line_spacing,
-            spacing2=self.line_spacing // 2,
+            spacing2=self.line_spacing//2,
             spacing3=self.line_spacing,
-            yscrollcommand=self.vsb.set,
+            yscrollcommand=self._on_yscroll,
         )
         self.txt.pack(side='left', fill='both', expand=True)
-        self.vsb.config(command=self.txt.yview)
-
         self.txt.bind('<Button-1>',   self._on_click)
-        self.txt.bind('<MouseWheel>', self._on_wheel)     # Windows / macOS
-        self.txt.bind('<Button-4>',   self._on_wheel)     # Linux scroll up
-        self.txt.bind('<Button-5>',   self._on_wheel)     # Linux scroll down
-
+        self.txt.bind('<MouseWheel>', self._on_wheel)
+        self.txt.bind('<Button-4>',   self._on_wheel)
+        self.txt.bind('<Button-5>',   self._on_wheel)
         self._show_welcome()
 
-        # 底部导航
-        self.botbar = tk.Frame(r, height=26)
-        self.botbar.pack(fill='x', side='bottom')
+        # 底部
+        self.bot_area = tk.Frame(r)
+        self.bot_area.pack(fill='x', side='bottom')
+
+        self.botbar = tk.Frame(self.bot_area, height=28)
+        self.botbar.pack(fill='x')
         self.botbar.pack_propagate(False)
 
-        self.btn_prev = tk.Button(self.botbar, text='◀ 上章', font=('', 8),
-                                  relief='flat', padx=5, command=self.prev_chapter)
-        self.btn_prev.pack(side='left', padx=6, pady=3)
+        self.btn_prev = tk.Button(self.botbar, text='◀', font=('',9),
+                                  relief='flat', padx=4, command=self.prev_chapter)
+        self.btn_prev.pack(side='left', padx=4, pady=3)
 
-        self.lbl_prog = tk.Label(self.botbar, text='', font=('', 8))
+        self.lbl_prog = tk.Label(self.botbar, text='', font=('',8))
         self.lbl_prog.pack(side='left', expand=True)
 
-        self.btn_bm = tk.Button(self.botbar, text='🔖', font=('', 9),
-                                relief='flat', padx=2, command=self.add_bookmark)
-        self.btn_bm.pack(side='right', padx=2, pady=3)
+        self.btn_tts = tk.Button(self.botbar, text='🔊', font=('',9),
+                                 relief='flat', padx=3, command=self.toggle_tts)
+        self.btn_tts.pack(side='right', padx=2, pady=3)
 
-        self.btn_next = tk.Button(self.botbar, text='下章 ▶', font=('', 8),
-                                  relief='flat', padx=5, command=self.next_chapter)
-        self.btn_next.pack(side='right', padx=6, pady=3)
+        self.btn_note = tk.Button(self.botbar, text='✏', font=('',9),
+                                  relief='flat', padx=3, command=self.add_note)
+        self.btn_note.pack(side='right', padx=2, pady=3)
+
+        self.btn_mark = tk.Button(self.botbar, text='🔖', font=('',9),
+                                  relief='flat', padx=2, command=self.add_mark)
+        self.btn_mark.pack(side='right', padx=2, pady=3)
+
+        self.btn_next = tk.Button(self.botbar, text='▶', font=('',9),
+                                  relief='flat', padx=4, command=self.next_chapter)
+        self.btn_next.pack(side='right', padx=4, pady=3)
+
+    def _tbtn(self, parent, text, cmd):
+        tk.Button(parent, text=text, font=('',8), relief='flat',
+                  padx=3, command=cmd).pack(side='left', padx=1)
 
     def _dot(self, p, color, cmd):
-        lb = tk.Label(p, text='⬤', fg=color, font=('', 12), cursor='hand2')
+        lb = tk.Label(p, text='⬤', fg=color, font=('',12), cursor='hand2')
         lb.pack(side='left', padx=2)
         lb.bind('<Button-1>', lambda e: cmd())
 
+    # ─────────────────────────────────────────────────
+    # 设置栏
+    # ─────────────────────────────────────────────────
     def _build_setbar(self):
-        r1 = tk.Frame(self.setbar); r1.pack(fill='x', padx=8, pady=2)
-        tk.Label(r1, text='字号', font=('',8)).pack(side='left')
-        self.sl_font = tk.Scale(r1, from_=10, to=32, orient='horizontal',
-                                length=70, showvalue=True, font=('',7),
-                                command=self._on_font_size)
-        self.sl_font.set(self.font_size)
-        self.sl_font.pack(side='left', padx=2)
+        def row(): f=tk.Frame(self.setbar); f.pack(fill='x',padx=8,pady=2); return f
 
-        tk.Label(r1, text='行距', font=('',8)).pack(side='left', padx=(8,0))
-        self.sl_spacing = tk.Scale(r1, from_=0, to=24, orient='horizontal',
-                                   length=70, showvalue=True, font=('',7),
-                                   command=self._on_spacing)
-        self.sl_spacing.set(self.line_spacing)
-        self.sl_spacing.pack(side='left', padx=2)
+        r1 = row()
+        tk.Label(r1,text='字号',font=('',8)).pack(side='left')
+        self.sl_font = tk.Scale(r1,from_=10,to=32,orient='horizontal',length=70,
+                                showvalue=True,font=('',7),command=self._on_font_size)
+        self.sl_font.set(self.font_size); self.sl_font.pack(side='left',padx=2)
+        tk.Label(r1,text='行距',font=('',8)).pack(side='left',padx=(8,0))
+        self.sl_spacing = tk.Scale(r1,from_=0,to=24,orient='horizontal',length=70,
+                                   showvalue=True,font=('',7),command=self._on_spacing)
+        self.sl_spacing.set(self.line_spacing); self.sl_spacing.pack(side='left',padx=2)
 
-        r2 = tk.Frame(self.setbar); r2.pack(fill='x', padx=8, pady=2)
-        tk.Label(r2, text='透明', font=('',8)).pack(side='left')
-        self.sl_alpha = tk.Scale(r2, from_=20, to=100, orient='horizontal',
-                                 length=80, showvalue=True, font=('',7),
-                                 command=lambda v: self.root.attributes('-alpha', int(v)/100))
-        self.sl_alpha.set(100)
-        self.sl_alpha.pack(side='left', padx=2)
+        r2 = row()
+        tk.Label(r2,text='透明',font=('',8)).pack(side='left')
+        self.sl_alpha = tk.Scale(r2,from_=20,to=100,orient='horizontal',length=80,
+                                 showvalue=True,font=('',7),
+                                 command=lambda v: self.root.attributes('-alpha',int(v)/100))
+        self.sl_alpha.set(100); self.sl_alpha.pack(side='left',padx=2)
+        # TTS 语速
+        tk.Label(r2,text='语速',font=('',8)).pack(side='left',padx=(8,0))
+        self.sl_tts_rate = tk.Scale(r2,from_=80,to=300,orient='horizontal',length=70,
+                                    showvalue=True,font=('',7),
+                                    command=lambda v: self.tts.set_rate(int(v)))
+        self.sl_tts_rate.set(180); self.sl_tts_rate.pack(side='left',padx=2)
 
-        r3 = tk.Frame(self.setbar); r3.pack(fill='x', padx=8, pady=2)
-        tk.Label(r3, text='字色', font=('',8)).pack(side='left')
-        self.btn_fg_color = tk.Button(r3, text='  ', relief='groove', width=2,
-                                      font=('',8), command=self._pick_fg)
-        self.btn_fg_color.pack(side='left', padx=2)
+        r3 = row()
+        tk.Label(r3,text='字色',font=('',8)).pack(side='left')
+        self.btn_fg_color = tk.Button(r3,text='  ',relief='groove',width=2,
+                                      font=('',8),command=self._pick_fg)
+        self.btn_fg_color.pack(side='left',padx=2)
+        tk.Label(r3,text='背景',font=('',8)).pack(side='left',padx=(6,0))
+        self.btn_bg_color = tk.Button(r3,text='  ',relief='groove',width=2,
+                                      font=('',8),command=self._pick_bg)
+        self.btn_bg_color.pack(side='left',padx=2)
+        tk.Button(r3,text='🎨取色',font=('',8),relief='flat',padx=4,
+                  command=self._screen_pick).pack(side='left',padx=4)
+        tk.Button(r3,text='重置',font=('',8),relief='flat',padx=4,
+                  command=self._reset_colors).pack(side='left',padx=2)
 
-        tk.Label(r3, text='背景', font=('',8)).pack(side='left', padx=(6,0))
-        self.btn_bg_color = tk.Button(r3, text='  ', relief='groove', width=2,
-                                      font=('',8), command=self._pick_bg)
-        self.btn_bg_color.pack(side='left', padx=2)
-
-        tk.Button(r3, text='🎨取色', font=('',8), relief='flat',
-                  padx=4, command=self._screen_pick).pack(side='left', padx=4)
-        tk.Button(r3, text='重置', font=('',8), relief='flat',
-                  padx=4, command=self._reset_colors).pack(side='left', padx=2)
-
-        r4 = tk.Frame(self.setbar); r4.pack(fill='x', padx=8, pady=2)
-        tk.Label(r4, text='主题', font=('',8)).pack(side='left')
+        r4 = row()
+        tk.Label(r4,text='主题',font=('',8)).pack(side='left')
         self.var_theme = tk.StringVar(value=self.theme_name)
-        cb = ttk.Combobox(r4, textvariable=self.var_theme,
-                          values=list(self.THEMES.keys()),
-                          width=7, font=('',8), state='readonly')
-        cb.pack(side='left', padx=4)
-        cb.bind('<<ComboboxSelected>>', self._on_theme)
+        cb = ttk.Combobox(r4,textvariable=self.var_theme,
+                          values=list(self.THEMES.keys()),width=7,font=('',8),state='readonly')
+        cb.pack(side='left',padx=4); cb.bind('<<ComboboxSelected>>',self._on_theme)
+        # 快速护眼切换
+        tk.Button(r4,text='☘护眼',font=('',8),relief='flat',padx=4,
+                  command=lambda: (self.var_theme.set('护眼'),self._on_theme())).pack(side='left',padx=2)
+        tk.Button(r4,text='🌙夜间',font=('',8),relief='flat',padx=4,
+                  command=lambda: (self.var_theme.set('夜间'),self._on_theme())).pack(side='left',padx=2)
 
     # ─────────────────────────────────────────────────
-    # 颜色 / 主题
+    # 颜色
     # ─────────────────────────────────────────────────
     def _pick_fg(self):
-        t = self._cur_theme()
-        c = colorchooser.askcolor(color=t['fg'], title='选择字体颜色')
-        if c and c[1]:
-            self.THEMES[self.theme_name]['fg'] = c[1]
-            self.txt.config(fg=c[1])
-            self.btn_fg_color.config(bg=c[1])
+        t=self._cur_theme(); c=colorchooser.askcolor(color=t['fg'],title='字体颜色')
+        if c and c[1]: self.THEMES[self.theme_name]['fg']=c[1]; self.txt.config(fg=c[1]); self.btn_fg_color.config(bg=c[1])
 
     def _pick_bg(self):
-        c = colorchooser.askcolor(color=self._cur_theme()['bg'], title='选择背景颜色')
+        c=colorchooser.askcolor(color=self._cur_theme()['bg'],title='背景颜色')
         if c and c[1]: self._apply_custom_bg(c[1])
 
     def _screen_pick(self):
-        alpha = self.sl_alpha.get() / 100
-        self.root.attributes('-alpha', 0.0)
-        def on_color(hx):
-            self.root.after(100, lambda: self.root.attributes('-alpha', alpha))
-            self._apply_custom_bg(hx)
-        self.root.after(120, lambda: screen_color_picker(on_color))
+        alpha=self.sl_alpha.get()/100; self.root.attributes('-alpha',0.0)
+        def on(hx): self.root.after(100,lambda:self.root.attributes('-alpha',alpha)); self._apply_custom_bg(hx)
+        self.root.after(120, lambda: screen_color_picker(on))
 
-    def _apply_custom_bg(self, hx):
-        self.custom_bg  = hx
-        self.custom_bar = self._darken(hx, 0.88)
-        self._apply_theme()
+    def _apply_custom_bg(self,hx):
+        self.custom_bg=hx; self.custom_bar=self._darken(hx,0.88); self._apply_theme()
         try: self.btn_bg_color.config(bg=hx)
         except: pass
 
-    def _reset_colors(self):
-        self.custom_bg = self.custom_bar = None
-        self._apply_theme()
-
-    def _darken(self, hx, f=0.88):
-        h = hx.lstrip('#')
-        return '#{:02x}{:02x}{:02x}'.format(
-            int(int(h[0:2],16)*f), int(int(h[2:4],16)*f), int(int(h[4:6],16)*f))
+    def _reset_colors(self): self.custom_bg=self.custom_bar=None; self._apply_theme()
+    def _darken(self,hx,f=0.88):
+        h=hx.lstrip('#')
+        return '#{:02x}{:02x}{:02x}'.format(int(int(h[0:2],16)*f),int(int(h[2:4],16)*f),int(int(h[4:6],16)*f))
 
     def _cur_theme(self):
-        import copy
-        t = copy.copy(self.THEMES[self.theme_name])
-        if self.custom_bg:  t['bg']  = self.custom_bg
-        if self.custom_bar: t['bar'] = self.custom_bar
+        t=copy.copy(self.THEMES[self.theme_name])
+        if self.custom_bg:  t['bg']=self.custom_bg
+        if self.custom_bar: t['bar']=self.custom_bar
         return t
 
     def _on_theme(self, e=None):
-        self.theme_name = self.var_theme.get()
-        self.custom_bg = self.custom_bar = None
-        self._apply_theme()
+        self.theme_name=self.var_theme.get(); self.custom_bg=self.custom_bar=None; self._apply_theme()
 
     def _apply_theme(self):
-        t = self._cur_theme()
-        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
         self.root.configure(bg=bar)
-        self._cf(self.topbar, bar, fg)
-        self._cf(self.botbar, bar, fg)
-        self.sep.config(bg=sel)
-        self.txt_frame.config(bg=bg)
-        self.vsb.config(bg=bar, troughcolor=bg, activebackground=sel)
-        self.txt.config(bg=bg, fg=fg, insertbackground=fg, selectbackground=sel)
-        self.lbl_prog.config(bg=bar, fg=fg)
-        self.btn_bm.config(bg=bar, fg=fg, activebackground=sel)
-        for b in (self.btn_prev, self.btn_next):
-            b.config(bg=bar, fg=fg, activebackground=sel)
+        self._cf(self.topbar,bar,fg); self._cf(self.botbar,bar,fg); self._cf(self.bot_area,bar,fg)
+        self.sep.config(bg=sel); self.txt_frame.config(bg=bg)
+        self.vsb.cv.config(bg=bg)
+        self.vsb.set_colors(bg=bg,track=sel,thumb=t.get('thumb',sel),thumb_hover=t.get('thumb_h',fg))
+        self.txt.config(bg=bg,fg=fg,insertbackground=fg,selectbackground=sel)
+        self.lbl_prog.config(bg=bar,fg=fg)
+        for b in (self.btn_prev,self.btn_next,self.btn_mark,self.btn_note,self.btn_tts):
+            b.config(bg=bar,fg=fg,activebackground=sel)
         self._retheme_setbar()
         try:
             if self.custom_bg: self.btn_bg_color.config(bg=self.custom_bg)
         except: pass
 
-    def _cf(self, fr, bg, fg):
+    def _cf(self,fr,bg,fg):
         try: fr.config(bg=bg)
         except: pass
         for w in fr.winfo_children():
-            try: w.config(bg=bg, fg=fg, activebackground=bg)
+            try: w.config(bg=bg,fg=fg,activebackground=bg)
             except: pass
             for w2 in w.winfo_children():
-                try: w2.config(bg=bg, fg=fg, activebackground=bg)
+                try: w2.config(bg=bg,fg=fg,activebackground=bg)
                 except: pass
 
     def _retheme_setbar(self):
-        t = self._cur_theme()
-        bg, fg, sel = t['bar'], t['fg'], t['sel']
-        self._cf(self.setbar, bg, fg)
-        for sl in (self.sl_font, self.sl_alpha, self.sl_spacing):
-            try: sl.config(bg=bg, fg=fg, troughcolor=sel, activebackground=sel)
+        t=self._cur_theme(); bg,fg,sel=t['bar'],t['fg'],t['sel']
+        self._cf(self.setbar,bg,fg)
+        for sl in (self.sl_font,self.sl_alpha,self.sl_spacing,self.sl_tts_rate):
+            try: sl.config(bg=bg,fg=fg,troughcolor=sel,activebackground=sel)
             except: pass
         try: self.btn_fg_color.config(bg=fg)
         except: pass
 
     # ─────────────────────────────────────────────────
+    # 字号 / 行距
+    # ─────────────────────────────────────────────────
+    def _on_font_size(self,val):
+        self.font_size=int(float(val)); self.txt.config(font=(self.font_fam,self.font_size))
+
+    def _on_spacing(self,val):
+        sp=int(float(val)); self.line_spacing=sp
+        self.txt.config(spacing1=sp,spacing2=sp//2,spacing3=sp)
+
+    # ─────────────────────────────────────────────────
     # 拖动窗口
     # ─────────────────────────────────────────────────
-    def _drag_start(self, e):
-        self._dx = e.x_root - self.root.winfo_x()
-        self._dy = e.y_root - self.root.winfo_y()
-
-    def _drag_move(self, e):
-        self.root.geometry(f'+{e.x_root-self._dx}+{e.y_root-self._dy}')
+    def _drag_start(self,e): self._dx=e.x_root-self.root.winfo_x(); self._dy=e.y_root-self.root.winfo_y()
+    def _drag_move(self,e):  self.root.geometry(f'+{e.x_root-self._dx}+{e.y_root-self._dy}')
 
     # ─────────────────────────────────────────────────
     # 打开文件
     # ─────────────────────────────────────────────────
-    def open_file(self):
-        path = filedialog.askopenfilename(
-            title='打开小说',
-            filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')]
-        )
+    def open_file(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(
+                title='打开小说',
+                filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')])
         if not path: return
         ext = os.path.splitext(path)[1].lower()
-        if ext == '.epub':
-            title, text = read_epub(path)
+        if ext == '.epub': title,text = read_epub(path)
         else:
             title = os.path.splitext(os.path.basename(path))[0]
             try:
-                with open(path, encoding='utf-8', errors='replace') as f:
-                    text = f.read()
-            except Exception as e:
-                messagebox.showerror('错误', str(e)); return
+                with open(path,encoding='utf-8',errors='replace') as f: text=f.read()
+            except Exception as e: messagebox.showerror('错误',str(e)); return
+        self.book_path=path; self.book_title=title
+        self.lbl_title.config(text=f'  {title}'); self.root.title(f'摸鱼阅读器 — {title}')
+        self._load(text)
 
-        self.book_path  = path
-        self.book_title = title
-        self.lbl_title.config(text=f'  {title}')
-        self.root.title(f'摸鱼阅读器 — {title}')
-        self._load(text, restore_bm=True)
-
-    def _load(self, text, restore_bm=False):
+    def _load(self,text):
         self.chapters = split_chapters(text)
-        self.cur_ch   = 0
-        if restore_bm and self.book_path in self.bookmarks:
-            saved = self.bookmarks[self.book_path].get('chapter', 0)
-            self.cur_ch = max(0, min(saved, len(self.chapters)-1))
+        # 恢复上次阅读位置
+        si = self.shelf.get(self.book_path,{})
+        self.cur_ch = max(0,min(si.get('last_ch',0),len(self.chapters)-1))
+        # 更新书架
+        self._shelf_update()
         self._render_chapter()
 
     # ─────────────────────────────────────────────────
-    # 渲染章节（核心：直接把整章文本塞进 Text）
+    # 书架管理
+    # ─────────────────────────────────────────────────
+    def _shelf_update(self):
+        p = self.book_path
+        prev = self.shelf.get(p,{})
+        self.shelf[p] = {
+            'title':      self.book_title,
+            'path':       p,
+            'last_ch':    self.cur_ch,
+            'total_ch':   len(self.chapters),
+            'last_time':  datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'added_time': prev.get('added_time', datetime.datetime.now().strftime('%Y-%m-%d')),
+        }
+        _jsave(SHELF_FILE, self.shelf)
+
+    def open_shelf(self):
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        win=tk.Toplevel(self.root); win.title('书架'); win.geometry('380x460')
+        win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+
+        hdr=tk.Frame(win,bg=bar,height=30); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='📚 书架',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=10,pady=5)
+        tk.Button(hdr,text='+添加',font=('',8),relief='flat',bg=bar,fg=fg,
+                  command=lambda:self._shelf_add(win)).pack(side='right',padx=4)
+        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,
+                  command=win.destroy).pack(side='right',padx=4)
+
+        # 书籍列表
+        frame=tk.Frame(win,bg=bg); frame.pack(fill='both',expand=True,padx=6,pady=6)
+        sb2=tk.Scrollbar(frame); sb2.pack(side='right',fill='y')
+        canvas=tk.Canvas(frame,bg=bg,highlightthickness=0,yscrollcommand=sb2.set)
+        canvas.pack(fill='both',expand=True); sb2.config(command=canvas.yview)
+        inner=tk.Frame(canvas,bg=bg); canvas.create_window((0,0),window=inner,anchor='nw')
+
+        def refresh():
+            for w in inner.winfo_children(): w.destroy()
+            if not self.shelf:
+                tk.Label(inner,text='书架空空，快去添加书吧',font=('',10),bg=bg,fg=sel).pack(pady=30)
+            for path,info in sorted(self.shelf.items(),key=lambda x:x[1].get('last_time',''),reverse=True):
+                self._shelf_card(inner,path,info,bg,fg,bar,sel,win,refresh)
+            inner.update_idletasks()
+            canvas.config(scrollregion=canvas.bbox('all'))
+        refresh()
+
+        rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+        win.geometry(f'380x460+{rx}+{ry}')
+
+    def _shelf_card(self,parent,path,info,bg,fg,bar,sel,shelf_win,refresh):
+        card=tk.Frame(parent,bg=bar,relief='flat',bd=0)
+        card.pack(fill='x',padx=4,pady=3)
+        # 封面色块
+        colors=['#8f3f71','#458588','#d79921','#689d6a','#cc241d']
+        ccolor=colors[hash(path)%len(colors)]
+        cover=tk.Frame(card,bg=ccolor,width=36,height=50); cover.pack(side='left',padx=6,pady=6); cover.pack_propagate(False)
+        tk.Label(cover,text='📖',font=('',14),bg=ccolor).pack(expand=True)
+        # 信息
+        info_f=tk.Frame(card,bg=bar); info_f.pack(side='left',fill='both',expand=True,pady=4)
+        tk.Label(info_f,text=info.get('title','未知'),font=('',9,'bold'),bg=bar,fg=fg,anchor='w').pack(fill='x')
+        lc=info.get('last_ch',0); tc=info.get('total_ch',1)
+        pct=int(lc/max(1,tc-1)*100) if tc>1 else 0
+        tk.Label(info_f,text=f'第{lc+1}/{tc}章  {pct}%',font=('',8),bg=bar,fg=sel,anchor='w').pack(fill='x')
+        # 进度条
+        pb_f=tk.Frame(info_f,bg=bar,height=4); pb_f.pack(fill='x',pady=2); pb_f.pack_propagate(False)
+        pb_done=tk.Frame(pb_f,bg=ccolor,height=4); pb_done.place(x=0,y=0,relwidth=pct/100,relheight=1)
+        tk.Frame(pb_f,bg=sel,height=4).place(x=0,y=0,relwidth=1,relheight=1)
+        pb_done.lift()
+        tk.Label(info_f,text=f'上次：{info.get("last_time","")}',font=('',7),bg=bar,fg=sel,anchor='w').pack(fill='x')
+        # 按钮
+        btn_f=tk.Frame(card,bg=bar); btn_f.pack(side='right',padx=6,pady=4)
+        def open_it(p=path):
+            shelf_win.destroy(); self.open_file(p)
+        def del_it(p=path):
+            if messagebox.askyesno('删除','从书架移除此书？',parent=shelf_win):
+                del self.shelf[p]; _jsave(SHELF_FILE,self.shelf); refresh()
+        tk.Button(btn_f,text='阅读',font=('',8),relief='flat',bg=ccolor,fg='white',
+                  padx=6,command=open_it).pack(pady=2)
+        tk.Button(btn_f,text='移除',font=('',7),relief='flat',bg=bar,fg=sel,
+                  padx=4,command=del_it).pack(pady=2)
+
+    def _shelf_add(self, shelf_win):
+        path=filedialog.askopenfilename(title='选择书籍',
+            filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')])
+        if not path: return
+        if path not in self.shelf:
+            title=os.path.splitext(os.path.basename(path))[0]
+            self.shelf[path]={'title':title,'path':path,'last_ch':0,'total_ch':0,
+                              'last_time':'','added_time':datetime.datetime.now().strftime('%Y-%m-%d')}
+            _jsave(SHELF_FILE,self.shelf)
+        shelf_win.destroy(); self.open_shelf()
+
+    # ─────────────────────────────────────────────────
+    # 渲染章节
     # ─────────────────────────────────────────────────
     def _render_chapter(self, scroll_to_top=True):
         if not self.chapters: return
-        self.cur_ch = max(0, min(self.cur_ch, len(self.chapters)-1))
-        ch = self.chapters[self.cur_ch]
-
-        self.txt.config(state='normal')
-        self.txt.delete('1.0', 'end')
-        self.txt.insert('1.0', ch['body'])
-        self.txt.config(state='disabled')
-
-        if scroll_to_top:
-            self.txt.yview_moveto(0.0)
-
-        self._update_nav()
-        self._wheel_accum = 0
+        self.cur_ch=max(0,min(self.cur_ch,len(self.chapters)-1))
+        ch=self.chapters[self.cur_ch]
+        self.txt.config(state='normal'); self.txt.delete('1.0','end')
+        self.txt.insert('1.0', ch['body']); self.txt.config(state='disabled')
+        if scroll_to_top: self.txt.yview_moveto(0.0)
+        self._update_nav(); self._wheel_accum=0
+        self._shelf_update()
 
     def _update_nav(self):
-        n   = len(self.chapters)
-        idx = self.cur_ch + 1
-        self.lbl_prog.config(text=f'第 {idx} / {n} 章')
-        self.btn_prev.config(state='normal' if self.cur_ch > 0   else 'disabled')
-        self.btn_next.config(state='normal' if self.cur_ch < n-1 else 'disabled')
+        n=len(self.chapters); idx=self.cur_ch+1
+        # 有无书签/笔记标记
+        m_chs={m['ch'] for m in self.marks.get(self.book_path,[])}
+        n_chs={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
+        flags=('🔖' if self.cur_ch in m_chs else '')+('✏' if self.cur_ch in n_chs else '')
+        self.lbl_prog.config(text=f'{flags}  第{idx}/{n}章')
+        self.btn_prev.config(state='normal' if self.cur_ch>0   else 'disabled')
+        self.btn_next.config(state='normal' if self.cur_ch<n-1 else 'disabled')
+
+    def _on_yscroll(self,lo,hi): self.vsb.set(lo,hi)
 
     # ─────────────────────────────────────────────────
-    # 章节切换
+    # 翻章
     # ─────────────────────────────────────────────────
     def next_chapter(self):
-        if self.chapters and self.cur_ch < len(self.chapters)-1:
-            self.cur_ch += 1
-            self._render_chapter(scroll_to_top=True)
+        if self.chapters and self.cur_ch<len(self.chapters)-1:
+            self.cur_ch+=1; self._render_chapter()
 
     def prev_chapter(self):
-        if self.chapters and self.cur_ch > 0:
-            self.cur_ch -= 1
-            self._render_chapter(scroll_to_top=True)
+        if self.chapters and self.cur_ch>0:
+            self.cur_ch-=1; self._render_chapter()
 
-    def goto_chapter(self, idx):
+    def goto_chapter(self,idx):
         if not self.chapters: return
-        self.cur_ch = max(0, min(idx, len(self.chapters)-1))
-        self._render_chapter(scroll_to_top=True)
+        self.cur_ch=max(0,min(idx,len(self.chapters)-1)); self._render_chapter()
 
-    # ─────────────────────────────────────────────────
-    # 点击：左侧上章 / 右侧下章（忽略中间 38%~62% 区域）
-    # ─────────────────────────────────────────────────
-    def _on_click(self, e):
-        w = self.txt.winfo_width()
-        if   e.x < w * 0.30:
-            self.prev_chapter()
-        elif e.x > w * 0.70:
-            self.next_chapter()
-        # 中间区域：不响应（方便选文字）
+    def _on_click(self,e):
+        w=self.txt.winfo_width()
+        if   e.x<w*0.28: self.prev_chapter()
+        elif e.x>w*0.72: self.next_chapter()
 
-    # ─────────────────────────────────────────────────
-    # 滚轮：章内正常滚动；到达顶/底时累计后切章
-    # ─────────────────────────────────────────────────
-    def _on_wheel(self, e):
-        # 判断滚动方向
-        if e.num == 4:          # Linux up
-            delta = 1
-        elif e.num == 5:        # Linux down
-            delta = -1
+    def _on_wheel(self,e):
+        delta=1 if e.num==4 else (-1 if e.num==5 else (1 if e.delta>0 else -1))
+        top,bot=self.txt.yview()
+        if delta<0:
+            if bot>=0.999:
+                self._wheel_accum-=1
+                if self._wheel_accum<=-3: self.next_chapter(); return
+            else: self._wheel_accum=0; self.txt.yview_scroll(3,'units')
         else:
-            delta = 1 if e.delta > 0 else -1   # Windows/macOS
+            if top<=0.001:
+                self._wheel_accum+=1
+                if self._wheel_accum>=3:
+                    self.prev_chapter(); self.root.after(30,lambda:self.txt.yview_moveto(1.0)); return
+            else: self._wheel_accum=0; self.txt.yview_scroll(-3,'units')
 
-        # 当前滚动位置 (top_frac, bottom_frac)
-        top, bot = self.txt.yview()
-
-        if delta < 0:   # 向下滚
-            if bot >= 0.999:
-                # 已在底部，累计后切下一章
-                self._wheel_accum -= 1
-                if self._wheel_accum <= -3:
-                    self.next_chapter()
-                    return
-            else:
-                self._wheel_accum = 0
-                self.txt.yview_scroll(3, 'units')
-        else:           # 向上滚
-            if top <= 0.001:
-                # 已在顶部，累计后切上一章
-                self._wheel_accum += 1
-                if self._wheel_accum >= 3:
-                    self.prev_chapter()
-                    # 切到上章后滚动到底部
-                    self.root.after(30, lambda: self.txt.yview_moveto(1.0))
-                    return
-            else:
-                self._wheel_accum = 0
-                self.txt.yview_scroll(-3, 'units')
+    def _scroll_down(self):
+        _,bot=self.txt.yview()
+        if bot>=0.999: self.next_chapter()
+        else: self.txt.yview_scroll(1,'pages')
 
     # ─────────────────────────────────────────────────
-    # S 键：向下翻一屏
+    # TTS 听书
     # ─────────────────────────────────────────────────
-    def _scroll_down_screen(self):
-        top, bot = self.txt.yview()
-        if bot >= 0.999:
-            self.next_chapter()
+    def toggle_tts(self):
+        if not self.tts.available:
+            messagebox.showinfo('提示','请先安装 pyttsx3：\npip install pyttsx3'); return
+        if self._tts_playing:
+            self.tts.stop(); self._tts_playing=False
+            self.btn_tts.config(text='🔊')
+            self._toast('⏹ 已停止朗读')
         else:
-            self.txt.yview_scroll(1, 'pages')
+            if not self.chapters: return
+            ch=self.chapters[self.cur_ch]
+            self._tts_playing=True; self.btn_tts.config(text='⏸')
+            self._toast('▶ 开始朗读…')
+            def done(): self.root.after(0,self._tts_done)
+            self.tts.speak(ch['body'],on_done=done)
+
+    def _tts_done(self):
+        self._tts_playing=False; self.btn_tts.config(text='🔊')
+
+    # ─────────────────────────────────────────────────
+    # 书签（O 键）
+    # ─────────────────────────────────────────────────
+    def add_mark(self):
+        if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
+        marks=self.marks.setdefault(self.book_path,[])
+        ch=self.chapters[self.cur_ch]; now=datetime.datetime.now().strftime('%m-%d %H:%M')
+        existing=next((m for m in marks if m['ch']==self.cur_ch),None)
+        entry={'ch':self.cur_ch,'ch_title':ch['title'],'time':now}
+        if existing: existing.update(entry); self._toast('🔖 书签已更新')
+        else: marks.append(entry); self._toast(f'🔖 书签已添加  第{self.cur_ch+1}章')
+        _jsave(MARKS_FILE,self.marks); self._update_nav()
+
+    def open_marks(self):
+        marks=self.marks.get(self.book_path,[])
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        win=tk.Toplevel(self.root); win.title('书签'); win.geometry('300x360')
+        win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='🔖 书签列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
+        sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+        lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+                      selectforeground=fg,borderwidth=0,highlightthickness=0,
+                      activestyle='none',yscrollcommand=sb2.set)
+        lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+        rows=list(marks)
+        for m in rows: lb.insert('end',f"  🏴 第{m['ch']+1}章  {m['ch_title']}  {m['time']}")
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+        def jump():
+            idxs=lb.curselection()
+            if not idxs: return
+            win.destroy(); self.goto_chapter(rows[idxs[0]]['ch'])
+        def delete():
+            idxs=lb.curselection()
+            if not idxs: return
+            m=rows.pop(idxs[0]); lb.delete(idxs[0])
+            self.marks[self.book_path]=[x for x in self.marks.get(self.book_path,[]) if x is not m]
+            _jsave(MARKS_FILE,self.marks); self._update_nav()
+        tk.Button(bf,text='跳转',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
+        tk.Button(bf,text='删除',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+        lb.bind('<Double-Button-1>',lambda e:jump())
+        rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+        win.geometry(f'300x360+{rx}+{ry}')
+
+    # ─────────────────────────────────────────────────
+    # 笔记（N 键）
+    # ─────────────────────────────────────────────────
+    def add_note(self):
+        if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
+        ch=self.chapters[self.cur_ch]
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        win=tk.Toplevel(self.root); win.title('添加笔记'); win.geometry('340x260')
+        win.attributes('-topmost',True); win.configure(bg=bg)
+        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text=f'✏ 笔记 — {ch["title"][:20]}',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+        # 选中文字自动填入
+        sel_text=''
+        try: sel_text=self.txt.get(tk.SEL_FIRST,tk.SEL_LAST)
+        except: pass
+        if sel_text:
+            tk.Label(win,text='引用文字：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
+            ref=tk.Label(win,text=sel_text[:80]+'…' if len(sel_text)>80 else sel_text,
+                        font=('',8,'italic'),bg=sel,fg=fg,wraplength=300,anchor='w',justify='left')
+            ref.pack(fill='x',padx=8,pady=2)
+        tk.Label(win,text='笔记内容：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
+        ta=tk.Text(win,height=6,font=('',10),bg=bg,fg=fg,insertbackground=fg,
+                   relief='flat',padx=8,pady=4,wrap='word',borderwidth=1,highlightthickness=1,
+                   highlightbackground=sel,highlightcolor=fg)
+        ta.pack(fill='both',expand=True,padx=8,pady=4); ta.focus()
+        def save():
+            content=ta.get('1.0','end').strip()
+            if not content: win.destroy(); return
+            notes=self.notes.setdefault(self.book_path,[])
+            now=datetime.datetime.now().strftime('%m-%d %H:%M')
+            notes.append({'ch':self.cur_ch,'ch_title':ch['title'],'content':content,
+                          'quote':sel_text,'time':now})
+            _jsave(NOTES_FILE,self.notes); self._update_nav(); win.destroy()
+            self._toast('✏ 笔记已保存')
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=8,pady=4)
+        tk.Button(bf,text='保存笔记',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',
+                  padx=10,command=save).pack(side='right',padx=4)
+        win.bind('<Control-Return>',lambda e:save())
+
+    def open_notes(self):
+        notes=self.notes.get(self.book_path,[])
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        win=tk.Toplevel(self.root); win.title('笔记'); win.geometry('360x480')
+        win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='✏ 笔记列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+
+        # 列表 + 详情
+        paned=tk.PanedWindow(win,orient='vertical',bg=bg,sashwidth=4,sashrelief='flat')
+        paned.pack(fill='both',expand=True,padx=4,pady=4)
+
+        top_f=tk.Frame(paned,bg=bg); paned.add(top_f,height=200)
+        sb2=tk.Scrollbar(top_f); sb2.pack(side='right',fill='y')
+        lb=tk.Listbox(top_f,font=('',9),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+                      selectforeground=fg,borderwidth=0,highlightthickness=0,
+                      activestyle='none',yscrollcommand=sb2.set)
+        lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+        rows=list(notes)
+        for n2 in rows: lb.insert('end',f"  第{n2['ch']+1}章  {n2['ch_title'][:16]}  {n2['time']}")
+
+        bot_f=tk.Frame(paned,bg=bg); paned.add(bot_f)
+        detail=tk.Text(bot_f,font=('',10),bg=bg,fg=fg,insertbackground=fg,
+                       relief='flat',padx=8,pady=6,wrap='word',state='disabled',
+                       borderwidth=0,highlightthickness=0)
+        detail.pack(fill='both',expand=True)
+
+        def show_detail(event=None):
+            idxs=lb.curselection()
+            if not idxs: return
+            n2=rows[idxs[0]]
+            detail.config(state='normal'); detail.delete('1.0','end')
+            if n2.get('quote'): detail.insert('end',f'引用：{n2["quote"]}\n\n','quote')
+            detail.insert('end',n2['content'])
+            detail.config(state='disabled')
+        lb.bind('<<ListboxSelect>>',show_detail)
+
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+        def jump():
+            idxs=lb.curselection()
+            if not idxs: return
+            win.destroy(); self.goto_chapter(rows[idxs[0]]['ch'])
+        def delete():
+            idxs=lb.curselection()
+            if not idxs: return
+            n2=rows.pop(idxs[0]); lb.delete(idxs[0])
+            self.notes[self.book_path]=[x for x in self.notes.get(self.book_path,[]) if x is not n2]
+            _jsave(NOTES_FILE,self.notes); self._update_nav()
+            detail.config(state='normal'); detail.delete('1.0','end'); detail.config(state='disabled')
+        tk.Button(bf,text='跳转章节',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
+        tk.Button(bf,text='删除笔记',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+        lb.bind('<Double-Button-1>',lambda e:jump())
+        rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+        win.geometry(f'360x480+{rx}+{ry}')
+
+    # ─────────────────────────────────────────────────
+    # 章节目录
+    # ─────────────────────────────────────────────────
+    def open_chapters(self):
+        if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        mark_set={m['ch'] for m in self.marks.get(self.book_path,[])}
+        note_set={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
+        win=tk.Toplevel(self.root); win.title('章节目录'); win.geometry('300x500')
+        win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='📑 章节目录',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+        sf=tk.Frame(win,bg=bg); sf.pack(fill='x',padx=6,pady=(6,2))
+        sv=tk.StringVar()
+        se=tk.Entry(sf,textvariable=sv,font=('',9),bg=bg,fg=fg,insertbackground=fg,relief='groove')
+        se.pack(fill='x',ipady=3)
+        PH='搜索章节名...'
+        se.insert(0,PH); se.config(fg='gray')
+        se.bind('<FocusIn>',lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
+        se.bind('<FocusOut>',lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
+        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
+        sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+        lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+                      selectforeground=fg,borderwidth=0,highlightthickness=0,
+                      activestyle='none',yscrollcommand=sb2.set)
+        lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+        btn_j=tk.Button(win,text='↩ 跳转',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',pady=5)
+        btn_j.pack(fill='x',padx=6,pady=4)
+        all_ch=list(self.chapters); visible=list(range(len(all_ch)))
+        def fill(indices):
+            visible.clear(); visible.extend(indices); lb.delete(0,'end')
+            for i in indices:
+                flags=('🔖' if i in mark_set else '')+('✏' if i in note_set else '')
+                cur='▶ ' if i==self.cur_ch else '  '
+                lb.insert('end',f'{cur}{i+1}. {all_ch[i]["title"]}{flags}')
+        fill(range(len(all_ch)))
+        try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
+        except: pass
+        def on_search(*_):
+            q=sv.get().strip()
+            fill(range(len(all_ch))) if q in ('',PH) else fill([i for i,c in enumerate(all_ch) if q in c['title']])
+        sv.trace_add('write',on_search)
+        def jump(e=None):
+            idxs=lb.curselection()
+            if not idxs: return
+            win.destroy(); self.goto_chapter(visible[idxs[0]])
+        btn_j.config(command=jump); lb.bind('<Double-Button-1>',jump); lb.bind('<Return>',jump)
+        rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+        win.geometry(f'300x500+{rx}+{ry}')
+
+    # ─────────────────────────────────────────────────
+    # Toast 提示
+    # ─────────────────────────────────────────────────
+    def _toast(self,msg,ms=1500):
+        t=self._cur_theme()
+        try:
+            for w in self.root.winfo_children():
+                if isinstance(w,tk.Label) and getattr(w,'_is_toast',False): w.destroy()
+        except: pass
+        toast=tk.Label(self.root,text=msg,font=('',8),bg=t['bar'],fg=t['fg'],
+                       padx=10,pady=4,relief='flat')
+        toast._is_toast=True
+        toast.place(relx=0.5,rely=0.06,anchor='n')
+        self.root.after(ms,lambda: (toast.winfo_exists() and toast.destroy()))
 
     # ─────────────────────────────────────────────────
     # 欢迎页
     # ─────────────────────────────────────────────────
     def _show_welcome(self):
-        self.txt.config(state='normal')
-        self.txt.delete('1.0','end')
-        self.txt.insert('1.0', (
-            '\n\n\n\n'
-            '       📚  摸鱼阅读器\n\n'
+        self.txt.config(state='normal'); self.txt.delete('1.0','end')
+        self.txt.insert('1.0',(
+            '\n\n\n'
+            '        📚  摸鱼阅读器  v8\n\n'
             '  支持：TXT  /  EPUB  /  MD\n\n'
-            '  ● 右上角 [打开] 选择文件\n'
-            '  ● 绿色圆点 快速打开\n'
-            '  ● 黄色圆点 打开设置\n\n'
-            '  操作方式：\n'
-            '    滚轮          章内上下滚动\n'
-            '    滚轮到底/顶   自动切换章节\n'
-            '    点击左侧 30%  上一章\n'
-            '    点击右侧 30%  下一章\n'
-            '    S / ↓         向下翻一屏\n'
-            '    ← / →         切换章节\n'
-            '    D + E         最小化\n'
+            '  顶部按钮：书架  目录  笔记  书签  打开\n\n'
+            '  操作：\n'
+            '    滚轮 / 拖拽右侧滚动条  章内滚动\n'
+            '    滚到章末再滚           切下一章\n'
+            '    点击左侧 28% / 右侧    切上下章\n'
+            '    ← →  切章   S/↓  翻屏\n\n'
+            '  快捷键：\n'
+            '    O        添加书签\n'
+            '    N        添加笔记\n'
+            '    F5       开始/停止朗读\n'
+            '    D+E      最小化\n'
         ))
         self.txt.config(state='disabled')
 
@@ -688,226 +3123,47 @@ class App:
     # 最小化
     # ─────────────────────────────────────────────────
     def toggle_minimize(self):
-        self._minimized = not self._minimized
+        self._minimized=not self._minimized
         if self._minimized:
-            self._saved_h = self.root.winfo_height()
-            for w in (self.setbar, self.sep, self.txt_frame, self.botbar):
-                w.pack_forget()
+            self._saved_h=self.root.winfo_height()
+            for w in (self.setbar,self.sep,self.txt_frame,self.bot_area): w.pack_forget()
             self.root.geometry(f'{self.root.winfo_width()}x30')
         else:
             self.root.geometry(f'{self.root.winfo_width()}x{self._saved_h}')
-            self.sep.pack(fill='x', after=self.topbar)
-            if self._settings_open:
-                self.setbar.pack(fill='x', after=self.topbar)
-                self._retheme_setbar()
-            self.txt_frame.pack(fill='both', expand=True)
-            self.botbar.pack(fill='x', side='bottom')
+            self.sep.pack(fill='x',after=self.topbar)
+            if self._settings_open: self.setbar.pack(fill='x',after=self.topbar); self._retheme_setbar()
+            self.txt_frame.pack(fill='both',expand=True)
+            self.bot_area.pack(fill='x',side='bottom')
 
-    # ─────────────────────────────────────────────────
-    # 设置栏
-    # ─────────────────────────────────────────────────
     def toggle_settings(self):
-        self._settings_open = not self._settings_open
-        if self._settings_open:
-            self.setbar.pack(fill='x', after=self.topbar)
-            self._retheme_setbar()
-        else:
-            self.setbar.pack_forget()
-
-    def _on_font_size(self, val):
-        self.font_size = int(float(val))
-        self.txt.config(font=(self.font_fam, self.font_size))
-
-    def _on_spacing(self, val):
-        self.line_spacing = int(float(val))
-        sp = self.line_spacing
-        self.txt.config(spacing1=sp, spacing2=sp//2, spacing3=sp)
+        self._settings_open=not self._settings_open
+        if self._settings_open: self.setbar.pack(fill='x',after=self.topbar); self._retheme_setbar()
+        else: self.setbar.pack_forget()
 
     # ─────────────────────────────────────────────────
-    # 章节目录
+    # 关闭时保存
     # ─────────────────────────────────────────────────
-    def open_chapters(self):
-        if not self.chapters:
-            messagebox.showinfo('提示','请先打开一本小说'); return
-
-        t  = self._cur_theme()
-        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
-
-        win = tk.Toplevel(self.root)
-        win.title('章节目录')
-        win.geometry('300x480')
-        win.resizable(True, True)
-        win.attributes('-topmost', True)
-        win.configure(bg=bg)
-
-        hdr = tk.Frame(win, bg=bar, height=28)
-        hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr, text='📑 章节目录', font=('',9,'bold'),
-                 bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
-        tk.Button(hdr, text='×', relief='flat', font=('',10),
-                  bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
-
-        # 搜索
-        sf = tk.Frame(win, bg=bg); sf.pack(fill='x', padx=6, pady=(6,2))
-        sv = tk.StringVar()
-        se = tk.Entry(sf, textvariable=sv, font=('',9), bg=bg, fg=fg,
-                      insertbackground=fg, relief='groove')
-        se.pack(fill='x', ipady=3)
-        PH = '搜索章节名...'
-        se.insert(0, PH); se.config(fg='gray')
-        se.bind('<FocusIn>',  lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
-        se.bind('<FocusOut>', lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
-
-        # 列表
-        lf = tk.Frame(win, bg=bg); lf.pack(fill='both', expand=True, padx=4, pady=4)
-        sb2 = tk.Scrollbar(lf); sb2.pack(side='right', fill='y')
-        lb = tk.Listbox(lf, font=('',10), relief='flat', bg=bg, fg=fg,
-                        selectbackground=sel, selectforeground=fg,
-                        borderwidth=0, highlightthickness=0,
-                        activestyle='none', yscrollcommand=sb2.set)
-        lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
-
-        btn_j = tk.Button(win, text='↩  跳转到选中章节', font=('',9,'bold'),
-                          bg=bar, fg=fg, relief='flat', pady=5)
-        btn_j.pack(fill='x', padx=6, pady=4)
-
-        all_ch  = list(self.chapters)   # [{'title','body'}]
-        visible = list(range(len(all_ch)))  # 存索引
-
-        def fill(indices):
-            visible.clear(); visible.extend(indices)
-            lb.delete(0,'end')
-            for i in indices:
-                lb.insert('end', f'  {i+1}. {all_ch[i]["title"]}')
-
-        fill(range(len(all_ch)))
-        # 高亮当前
-        try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
-        except: pass
-
-        def on_search(*_):
-            q = sv.get().strip()
-            if q in ('', PH):
-                fill(range(len(all_ch)))
-            else:
-                fill([i for i,c in enumerate(all_ch) if q in c['title']])
-        sv.trace_add('write', on_search)
-
-        def jump(event=None):
-            idxs = lb.curselection()
-            if not idxs: return
-            real_idx = visible[idxs[0]]
-            win.destroy()
-            self.goto_chapter(real_idx)
-
-        btn_j.config(command=jump)
-        lb.bind('<Double-Button-1>', jump)
-        lb.bind('<Return>', jump)
-
-        rx = self.root.winfo_x() + self.root.winfo_width() + 8
-        ry = self.root.winfo_y()
-        win.geometry(f'300x480+{rx}+{ry}')
-
-    # ─────────────────────────────────────────────────
-    # 书签
-    # ─────────────────────────────────────────────────
-    def add_bookmark(self):
-        if not self.book_path:
-            messagebox.showinfo('提示','请先打开一本小说'); return
-        ch = self.chapters[self.cur_ch] if self.chapters else {}
-        self.bookmarks[self.book_path] = {
-            'title':    self.book_title,
-            'chapter':  self.cur_ch,
-            'total':    len(self.chapters),
-            'ch_title': ch.get('title',''),
-            'path':     self.book_path,
-        }
-        bm_save(self.bookmarks)
-        n = len(self.chapters)
-        messagebox.showinfo('🔖 书签',
-            f'已保存\n第 {self.cur_ch+1} / {n} 章\n{ch.get("title","")}')
-
-    def open_bookmarks(self):
-        if not self.bookmarks:
-            messagebox.showinfo('书签','暂无书签'); return
-        t  = self._cur_theme()
-        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
-
-        win = tk.Toplevel(self.root)
-        win.title('书签'); win.geometry('320x300')
-        win.resizable(True,True); win.attributes('-topmost',True)
-        win.configure(bg=bg)
-
-        hdr = tk.Frame(win, bg=bar, height=28)
-        hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr, text='🔖 书签列表', font=('',9,'bold'),
-                 bg=bar, fg=fg).pack(side='left', padx=8, pady=4)
-        tk.Button(hdr, text='×', relief='flat', font=('',10),
-                  bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
-
-        lf = tk.Frame(win, bg=bg); lf.pack(fill='both', expand=True, padx=4, pady=4)
-        sb2 = tk.Scrollbar(lf); sb2.pack(side='right', fill='y')
-        lb = tk.Listbox(lf, font=('',10), relief='flat', bg=bg, fg=fg,
-                        selectbackground=sel, selectforeground=fg,
-                        borderwidth=0, highlightthickness=0,
-                        activestyle='none', yscrollcommand=sb2.set)
-        lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
-
-        keys = list(self.bookmarks.keys())
-        for k in keys:
-            bm = self.bookmarks[k]
-            s  = f"  {bm['title']}  第{bm['chapter']+1}章"
-            if bm.get('ch_title'): s += f"  ·  {bm['ch_title']}"
-            lb.insert('end', s)
-
-        bf = tk.Frame(win, bg=bar); bf.pack(fill='x', padx=6, pady=4)
-
-        def goto_bm():
-            idxs = lb.curselection()
-            if not idxs: return
-            bm = self.bookmarks[keys[idxs[0]]]
-            win.destroy()
-            if bm['path'] != self.book_path:
-                ext = os.path.splitext(bm['path'])[1].lower()
-                try:
-                    if ext == '.epub': _t, text = read_epub(bm['path'])
-                    else:
-                        with open(bm['path'],encoding='utf-8',errors='replace') as f: text=f.read()
-                except:
-                    messagebox.showerror('错误','文件不存在或已移动'); return
-                self.book_path = bm['path']; self.book_title = bm['title']
-                self.lbl_title.config(text=f"  {bm['title']}")
-                self.root.title(f"摸鱼阅读器 — {bm['title']}")
-                self.chapters = split_chapters(text)
-            self.goto_chapter(bm['chapter'])
-
-        def del_bm():
-            idxs = lb.curselection()
-            if not idxs: return
-            k = keys.pop(idxs[0])
-            del self.bookmarks[k]; bm_save(self.bookmarks)
-            lb.delete(idxs[0])
-
-        tk.Button(bf, text='跳转', font=('',9), bg=bar, fg=fg,
-                  relief='flat', padx=8, command=goto_bm).pack(side='left', padx=4)
-        tk.Button(bf, text='删除', font=('',9), bg=bar, fg=fg,
-                  relief='flat', padx=8, command=del_bm).pack(side='left', padx=4)
-
-        rx = self.root.winfo_x() + self.root.winfo_width() + 8
-        ry = self.root.winfo_y()
-        win.geometry(f'320x300+{rx}+{ry}')
+    def _on_close(self):
+        self.tts.stop()
+        self._shelf_update()
+        self.root.destroy()
 
     # ─────────────────────────────────────────────────
     # 快捷键
     # ─────────────────────────────────────────────────
     def _bind_keys(self):
-        r = self.root
-        r.bind('<KeyPress-s>',   lambda e: self._scroll_down_screen())
-        r.bind('<KeyPress-S>',   lambda e: self._scroll_down_screen())
+        r=self.root
+        r.bind('<KeyPress-s>',   lambda e: self._scroll_down())
+        r.bind('<KeyPress-S>',   lambda e: self._scroll_down())
         r.bind('<Right>',        lambda e: self.next_chapter())
         r.bind('<Left>',         lambda e: self.prev_chapter())
-        r.bind('<Down>',         lambda e: self._scroll_down_screen())
+        r.bind('<Down>',         lambda e: self._scroll_down())
         r.bind('<Up>',           lambda e: self.txt.yview_scroll(-3,'units'))
+        r.bind('<KeyPress-o>',   lambda e: self.add_mark())
+        r.bind('<KeyPress-O>',   lambda e: self.add_mark())
+        r.bind('<KeyPress-n>',   lambda e: self.add_note())
+        r.bind('<KeyPress-N>',   lambda e: self.add_note())
+        r.bind('<F5>',           lambda e: self.toggle_tts())
         r.bind('<KeyPress-d>',   self._dp)
         r.bind('<KeyPress-D>',   self._dp)
         r.bind('<KeyRelease-d>', self._dr)
@@ -916,9 +3172,9 @@ class App:
         r.bind('<KeyPress-E>',   self._ep)
         r.focus_set()
 
-    def _dp(self, e): self._d_held = True
-    def _dr(self, e): self._d_held = False
-    def _ep(self, e):
+    def _dp(self,e): self._d_held=True
+    def _dr(self,e): self._d_held=False
+    def _ep(self,e):
         if self._d_held: self.toggle_minimize()
 
 

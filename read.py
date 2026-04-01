@@ -2068,7 +2068,6 @@
 #     except: pass
 #     App()
 
-
 """
 摸鱼阅读器 v8.0  —  全功能版
 功能：
@@ -2193,6 +2192,22 @@ def _jsave(f, d):
     try:
         with open(f, 'w', encoding='utf-8') as fp: json.dump(d, fp, ensure_ascii=False, indent=2)
     except: pass
+
+def _inject_api_key():
+    """
+    从程序目录的 api_key.txt 自动读取智谱 API Key。
+    用户把 Key 粘贴进 api_key.txt 即可，无需手动配置环境变量。
+    返回 key 字符串，失败返回空字符串。
+    """
+    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_key.txt')
+    if os.path.exists(key_file):
+        try:
+            key = open(key_file, encoding='utf-8').read().strip()
+            if key:
+                os.environ['ZHIPU_API_KEY'] = key
+                return key
+        except: pass
+    return os.environ.get('ZHIPU_API_KEY', '')
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2459,6 +2474,8 @@ class App:
         rbf = tk.Frame(self.topbar); rbf.pack(side='right', padx=2)
         self._tbtn(rbf, '书架', self.open_shelf)
         self._tbtn(rbf, '目录', self.open_chapters)
+        self._tbtn(rbf, '搜索', self.open_search)
+        self._tbtn(rbf, '摘要', self.open_summary)
         self._tbtn(rbf, '笔记', self.open_notes)
         self._tbtn(rbf, '书签', self.open_marks)
         self._tbtn(rbf, '打开', self.open_file)
@@ -3141,6 +3158,410 @@ class App:
         else: self.setbar.pack_forget()
 
     # ─────────────────────────────────────────────────
+    # 全文搜索（Ctrl+F）
+    # ─────────────────────────────────────────────────
+    def open_search(self):
+        if not self.chapters:
+            messagebox.showinfo('提示', '请先打开小说'); return
+
+        t = self._cur_theme()
+        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+        # 若搜索窗已存在则聚焦
+        if hasattr(self, '_search_win') and self._search_win.winfo_exists():
+            self._search_win.lift(); self._search_win.focus_force(); return
+
+        win = tk.Toplevel(self.root)
+        win.title('全文搜索')
+        win.geometry('480x560')
+        win.resizable(True, True)
+        win.attributes('-topmost', True)
+        win.configure(bg=bg)
+        self._search_win = win
+
+        # ── 顶部搜索框 ────────────────────────────────
+        top = tk.Frame(win, bg=bar); top.pack(fill='x', padx=0, pady=0)
+        tk.Label(top, text='🔍', font=('',11), bg=bar, fg=fg).pack(side='left', padx=8, pady=6)
+
+        sv = tk.StringVar()
+        entry = tk.Entry(top, textvariable=sv, font=('',11), bg=bg, fg=fg,
+                         insertbackground=fg, relief='flat', bd=0)
+        entry.pack(side='left', fill='x', expand=True, ipady=4)
+
+        # 大小写 / 正则 选项
+        var_case  = tk.BooleanVar(value=False)
+        var_regex = tk.BooleanVar(value=False)
+        tk.Checkbutton(top, text='Aa', variable=var_case, font=('',8),
+                       bg=bar, fg=fg, activebackground=bar,
+                       selectcolor=bg).pack(side='left', padx=2)
+        tk.Checkbutton(top, text='.*', variable=var_regex, font=('',8),
+                       bg=bar, fg=fg, activebackground=bar,
+                       selectcolor=bg).pack(side='left', padx=2)
+
+        lbl_count = tk.Label(top, text='', font=('',8), bg=bar, fg=sel)
+        lbl_count.pack(side='left', padx=6)
+        tk.Button(top, text='×', relief='flat', font=('',10),
+                  bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+        sep2 = tk.Frame(win, height=1, bg=sel); sep2.pack(fill='x')
+
+        # ── 结果列表 ──────────────────────────────────
+        list_frame = tk.Frame(win, bg=bg); list_frame.pack(fill='both', expand=True)
+        sb2 = tk.Scrollbar(list_frame); sb2.pack(side='right', fill='y')
+        lb = tk.Listbox(list_frame, font=('',9), relief='flat', bg=bg, fg=fg,
+                        selectbackground=sel, selectforeground=fg,
+                        borderwidth=0, highlightthickness=0,
+                        activestyle='none', yscrollcommand=sb2.set)
+        lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+
+        # ── 预览区 ────────────────────────────────────
+        sep3 = tk.Frame(win, height=1, bg=sel); sep3.pack(fill='x')
+        preview_frame = tk.Frame(win, bg=bg, height=130)
+        preview_frame.pack(fill='x', padx=0); preview_frame.pack_propagate(False)
+
+        preview = tk.Text(preview_frame, font=('',9), bg=bg, fg=fg,
+                          relief='flat', padx=12, pady=6, wrap='word',
+                          state='disabled', borderwidth=0, highlightthickness=0)
+        preview.pack(fill='both', expand=True)
+        preview.tag_config('hit',  background='#d79921', foreground='#1d2021')
+        preview.tag_config('info', foreground=sel)
+
+        # 底部跳转栏
+        bot_f = tk.Frame(win, bg=bar, height=30)
+        bot_f.pack(fill='x'); bot_f.pack_propagate(False)
+        lbl_loc = tk.Label(bot_f, text='', font=('',8), bg=bar, fg=fg)
+        lbl_loc.pack(side='left', padx=8, pady=4)
+        btn_jump = tk.Button(bot_f, text='↩ 跳转到此处', font=('',8,'bold'),
+                             bg=bar, fg=fg, relief='flat', padx=8,
+                             state='disabled')
+        btn_jump.pack(side='right', padx=8, pady=3)
+
+        # ── 搜索逻辑 ──────────────────────────────────
+        results = []   # [(ch_idx, start_in_body, end_in_body, snippet)]
+
+        def do_search(*_):
+            results.clear(); lb.delete(0, 'end')
+            query = sv.get().strip()
+            if not query:
+                lbl_count.config(text=''); return
+
+            flags = 0 if var_case.get() else re.IGNORECASE
+            try:
+                if var_regex.get():
+                    pat = re.compile(query, flags)
+                else:
+                    pat = re.compile(re.escape(query), flags)
+            except re.error as e:
+                lbl_count.config(text=f'正则错误: {e}'); return
+
+            CONTEXT = 40   # 匹配前后各取多少字符
+            for ci, ch in enumerate(self.chapters):
+                for m in pat.finditer(ch['body']):
+                    s, e2 = m.start(), m.end()
+                    pre  = ch['body'][max(0, s-CONTEXT):s].replace('\n', ' ')
+                    hit  = ch['body'][s:e2]
+                    post = ch['body'][e2:min(len(ch['body']), e2+CONTEXT)].replace('\n', ' ')
+                    snippet = (pre, hit, post)
+                    results.append((ci, s, e2, snippet))
+
+            lbl_count.config(text=f'共 {len(results)} 处')
+            for ci, s, e2, (pre, hit, post) in results:
+                ch_title = self.chapters[ci]['title']
+                display  = f"  第{ci+1}章  {ch_title[:14]}…  「{hit[:20]}」"
+                lb.insert('end', display)
+
+            # 清空预览
+            preview.config(state='normal'); preview.delete('1.0','end')
+            preview.config(state='disabled')
+            lbl_loc.config(text='')
+            btn_jump.config(state='disabled')
+
+        sv.trace_add('write', do_search)
+        var_case.trace_add('write',  do_search)
+        var_regex.trace_add('write', do_search)
+
+        def on_select(event=None):
+            idxs = lb.curselection()
+            if not idxs: return
+            ci, s, e2, (pre, hit, post) = results[idxs[0]]
+            ch = self.chapters[ci]
+
+            # 更新预览
+            preview.config(state='normal'); preview.delete('1.0','end')
+            preview.insert('end', f'第{ci+1}章  {ch["title"]}\n', 'info')
+            preview.insert('end', '…' + pre)
+            preview.insert('end', hit, 'hit')
+            preview.insert('end', post + '…')
+            preview.config(state='disabled')
+
+            lbl_loc.config(text=f'第{ci+1}章 · 位置 {s}')
+            btn_jump.config(state='normal',
+                            command=lambda: _jump(ci, s, e2, hit))
+
+        def _jump(ci, s, e2, hit):
+            # 跳转到章节，并高亮匹配文字
+            self.goto_chapter(ci)
+            win.lift()
+            # 在 txt 里找到并高亮
+            self.root.after(80, lambda: _highlight_in_txt(hit))
+
+        def _highlight_in_txt(hit):
+            self.txt.tag_remove('search_hit', '1.0', 'end')
+            self.txt.tag_config('search_hit', background='#d79921', foreground='#1d2021')
+            start = '1.0'
+            while True:
+                pos = self.txt.search(hit, start, nocase=not var_case.get(), stopindex='end')
+                if not pos: break
+                end_pos = f'{pos}+{len(hit)}c'
+                self.txt.tag_add('search_hit', pos, end_pos)
+                self.txt.see(pos)
+                start = end_pos
+
+        lb.bind('<<ListboxSelect>>', on_select)
+        lb.bind('<Double-Button-1>', lambda e: btn_jump.invoke())
+        lb.bind('<Return>',         lambda e: btn_jump.invoke())
+
+        entry.focus()
+        # 如果有选中文字，自动填入搜索框
+        try:
+            sel_text = self.txt.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+            if sel_text and '\n' not in sel_text:
+                sv.set(sel_text)
+        except: pass
+
+        rx = self.root.winfo_x() + self.root.winfo_width() + 8
+        ry = self.root.winfo_y()
+        win.geometry(f'480x560+{rx}+{ry}')
+
+    # ─────────────────────────────────────────────────
+    # 章节摘要（Ctrl+M）—— 调用智谱 GLM API
+    # ─────────────────────────────────────────────────
+    def open_summary(self):
+        if not self.chapters:
+            messagebox.showinfo('提示', '请先打开小说'); return
+
+        # ── 把所有内部状态装进一个对象，避免闭包变量遮蔽 ────
+        class State:
+            ch_body  = self.chapters[self.cur_ch]['body']
+            ch_title = self.chapters[self.cur_ch]['title']
+            ch_idx   = self.cur_ch
+            result   = ''   # 生成的摘要文本
+
+        st = State()
+        t  = self._cur_theme()
+        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title('章节摘要')
+        dlg.geometry('420x460')
+        dlg.resizable(True, True)
+        dlg.attributes('-topmost', True)
+        dlg.configure(bg=bg)
+
+        # 标题栏
+        hdr = tk.Frame(dlg, bg=bar, height=30)
+        hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr, text=f'✨ 摘要 — {st.ch_title[:24]}',
+                 font=('',9,'bold'), bg=bar, fg=fg).pack(side='left', padx=8, pady=5)
+        tk.Button(hdr, text='×', relief='flat', font=('',10),
+                  bg=bar, fg=fg, command=dlg.destroy).pack(side='right', padx=6)
+
+        # 选项行
+        opt = tk.Frame(dlg, bg=bar); opt.pack(fill='x', padx=8, pady=4)
+        tk.Label(opt, text='长度', font=('',8), bg=bar, fg=fg).pack(side='left')
+        v_len = tk.StringVar(value='标准')
+        for lbl_text in ('简短','标准','详细'):
+            tk.Radiobutton(opt, text=lbl_text, variable=v_len, value=lbl_text,
+                           font=('',8), bg=bar, fg=fg,
+                           activebackground=bar, selectcolor=bg).pack(side='left', padx=3)
+
+        tk.Label(opt, text='  风格', font=('',8), bg=bar, fg=fg).pack(side='left')
+        v_style = tk.StringVar(value='客观')
+        for lbl_text in ('客观','活泼','学术'):
+            tk.Radiobutton(opt, text=lbl_text, variable=v_style, value=lbl_text,
+                           font=('',8), bg=bar, fg=fg,
+                           activebackground=bar, selectcolor=bg).pack(side='left', padx=3)
+
+        tk.Frame(dlg, height=1, bg=sel).pack(fill='x')
+
+        # 文本展示区
+        out = tk.Text(dlg, font=('',10), bg=bg, fg=fg,
+                      insertbackground=fg, relief='flat',
+                      padx=14, pady=10, wrap='word',
+                      borderwidth=0, highlightthickness=0,
+                      state='disabled')
+        out.pack(fill='both', expand=True)
+        out.tag_config('dim',  foreground=sel)
+        out.tag_config('warn', foreground='#cc241d')
+
+        # 底部按钮行
+        bf = tk.Frame(dlg, bg=bar, height=34)
+        bf.pack(fill='x', side='bottom'); bf.pack_propagate(False)
+
+        b_gen  = tk.Button(bf, text='✨ 生成摘要', font=('',9,'bold'),
+                           bg=bar, fg=fg, relief='flat', padx=10)
+        b_gen.pack(side='left', padx=8, pady=4)
+        b_copy = tk.Button(bf, text='复制', font=('',8),
+                           bg=bar, fg=fg, relief='flat', padx=6, state='disabled')
+        b_copy.pack(side='left', padx=2, pady=4)
+        b_note = tk.Button(bf, text='存笔记', font=('',8),
+                           bg=bar, fg=fg, relief='flat', padx=6, state='disabled')
+        b_note.pack(side='left', padx=2, pady=4)
+        lbl_st = tk.Label(bf, text='', font=('',8), bg=bar, fg=sel)
+        lbl_st.pack(side='right', padx=8)
+
+        # ── 工具函数 ──────────────────────────────────
+        def show(text, tag=''):
+            out.config(state='normal')
+            out.delete('1.0', 'end')
+            if tag:
+                out.insert('end', text, tag)
+            else:
+                out.insert('end', text)
+            out.config(state='disabled')
+
+        def build_prompt():
+            length_map = {'简短':'100字以内','标准':'200字左右','详细':'400字左右'}
+            style_map  = {'客观':'客观简洁','活泼':'生动活泼，可适当使用emoji','学术':'学术严谨，条理清晰'}
+            body_clip  = st.ch_body[:4000]
+            return (
+                f"请对以下小说章节内容做摘要，要求：\n"
+                f"1. 长度：{length_map[v_len.get()]}\n"
+                f"2. 风格：{style_map[v_style.get()]}\n"
+                f"3. 包含：主要人物、核心情节、关键转折\n"
+                f"4. 直接输出摘要内容，不要任何前缀\n\n"
+                f"章节标题：{st.ch_title}\n\n"
+                f"章节内容：\n{body_clip}"
+            )
+
+        def on_success(text):
+            st.result = text
+            show(text)
+            b_gen.config(state='normal', text='✨ 重新生成')
+            b_copy.config(state='normal')
+            b_note.config(state='normal')
+            lbl_st.config(text=f'约 {len(text)} 字')
+
+        def on_error(msg):
+            b_gen.config(state='normal', text='✨ 生成摘要')
+            if msg == 'NO_KEY':
+                show(
+                    '⚠ 未找到 API Key\n\n'
+                    '请在程序同目录新建 api_key.txt，\n'
+                    '把智谱 API Key 粘贴进去保存。\n\n'
+                    '获取地址：https://open.bigmodel.cn\n'
+                    'GLM-4-Flash 对新用户有免费额度。',
+                    'warn'
+                )
+            else:
+                show(f'⚠ 生成失败\n\n{msg}', 'warn')
+
+        def do_generate():
+            b_gen.config(state='disabled', text='生成中…')
+            b_copy.config(state='disabled')
+            b_note.config(state='disabled')
+            lbl_st.config(text='')
+            show('正在调用智谱 GLM，请稍候…', 'dim')
+
+            # 【修复关键】必须在主线程获取 Tkinter 的变量，提前拼接好字符串
+            try:
+                _prompt = build_prompt()
+            except Exception as e:
+                on_error(f"构建提示词失败: {e}")
+                return
+
+            # 在后台线程执行网络请求，全部用局部变量
+            def worker():
+                import urllib.request as _req_mod
+                import urllib.error  as _err_mod
+                import json          as _json_mod
+
+                try:
+                    _api_key = _inject_api_key()
+                    if not _api_key:
+                        dlg.after(0, lambda: on_error('NO_KEY'))
+                        return
+
+                    _payload = _json_mod.dumps({
+                        'model':       'glm-4-flash',
+                        'max_tokens':  1024,
+                        'temperature': 0.7,
+                        'messages':    [{'role': 'user', 'content': _prompt}],
+                    }).encode('utf-8')
+
+                    _request = _req_mod.Request(
+                        'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+                        data    = _payload,
+                        headers = {
+                            'Content-Type':  'application/json',
+                            'Authorization': f'Bearer {_api_key}',
+                        },
+                        method  = 'POST',
+                    )
+                    
+                    with _req_mod.urlopen(_request, timeout=30) as _resp:
+                        _raw     = _resp.read().decode('utf-8')
+                        _parsed  = _json_mod.loads(_raw)
+                        _summary = _parsed['choices'][0]['message']['content'].strip()
+                    dlg.after(0, lambda s=_summary: on_success(s))
+                    
+                except _err_mod.HTTPError as _he:
+                    _body = _he.read().decode('utf-8', errors='replace')
+                    try:
+                        _eobj = _json_mod.loads(_body)
+                        _emsg = _eobj.get('error', {}).get('message', _body)
+                    except Exception:
+                        _emsg = _body[:300]
+                    _code = str(_he.code)
+                    dlg.after(0, lambda c=_code, m=_emsg: on_error(f'HTTP {c}: {m}'))
+                except Exception as _ex:
+                    _msg = str(_ex)
+                    dlg.after(0, lambda m=_msg: on_error(m))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def do_copy():
+            if not st.result: return
+            dlg.clipboard_clear()
+            dlg.clipboard_append(st.result)
+            lbl_st.config(text='已复制！')
+            dlg.after(1500, lambda: lbl_st.config(text=f'约 {len(st.result)} 字'))
+
+        def do_save_note():
+            if not st.result: return
+            note_list = self.notes.setdefault(self.book_path, [])
+            note_list.append({
+                'ch':       st.ch_idx,
+                'ch_title': st.ch_title,
+                'content':  f'[AI摘要]\n{st.result}',
+                'quote':    '',
+                'time':     datetime.datetime.now().strftime('%m-%d %H:%M'),
+            })
+            _jsave(NOTES_FILE, self.notes)
+            self._update_nav()
+            self._toast('✏ 摘要已存为笔记')
+            lbl_st.config(text='已保存为笔记')
+
+        b_gen.config(command=do_generate)
+        b_copy.config(command=do_copy)
+        b_note.config(command=do_save_note)
+
+        # 初始提示
+        _has_key = bool(_inject_api_key())
+        _key_tip = '' if _has_key else '\n\n⚠ 未检测到 api_key.txt，点击生成后会显示配置说明。'
+        show(
+            f'📖 {st.ch_title}\n\n'
+            f'本章约 {len(st.ch_body)} 字。\n'
+            f'点击「✨ 生成摘要」开始。'
+            f'{_key_tip}',
+            'dim'
+        )
+
+        _rx = self.root.winfo_x() + self.root.winfo_width() + 8
+        _ry = self.root.winfo_y()
+        dlg.geometry(f'420x460+{_rx}+{_ry}')
+
+    # ─────────────────────────────────────────────────
     # 关闭时保存
     # ─────────────────────────────────────────────────
     def _on_close(self):
@@ -3164,6 +3585,10 @@ class App:
         r.bind('<KeyPress-n>',   lambda e: self.add_note())
         r.bind('<KeyPress-N>',   lambda e: self.add_note())
         r.bind('<F5>',           lambda e: self.toggle_tts())
+        r.bind('<Control-f>',    lambda e: self.open_search())
+        r.bind('<Control-F>',    lambda e: self.open_search())
+        r.bind('<Control-m>',    lambda e: self.open_summary())
+        r.bind('<Control-M>',    lambda e: self.open_summary())
         r.bind('<KeyPress-d>',   self._dp)
         r.bind('<KeyPress-D>',   self._dp)
         r.bind('<KeyRelease-d>', self._dr)

@@ -9491,7 +9491,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 SHELF_FILE = os.path.join(DATA_DIR, 'shelf.json')
 NOTES_FILE = os.path.join(DATA_DIR, 'notes.json')
 MARKS_FILE = os.path.join(DATA_DIR, 'marks.json')
-
+BOSS_FILE  = os.path.join(DATA_DIR, 'boss_text.txt')  # <== 新增这一行：伪装文档的保存路径
 def _jload(f):
     try:
         with open(f, encoding='utf-8') as fp: return json.load(fp)
@@ -9530,6 +9530,8 @@ class TTS:
         self._text   = ''
         self._rate   = 180
         self._avail  = False
+        # self._tts_playing   = False
+        # self._is_boss_mode  = False  # 新增：老板键状态
         self._init()
 
     def _init(self):
@@ -9751,7 +9753,7 @@ class App:
         self._settings_open = False
         self._wheel_accum   = 0
         self._tts_playing   = False
-
+        self._is_boss_mode  = False  # <======== 就是漏了这一行！一定要加在这里！
         self.tts = TTS()
 
         self._build_ui()
@@ -9922,7 +9924,9 @@ class App:
                   command=lambda: (self.var_theme.set('护眼'),self._on_theme())).pack(side='left',padx=2)
         tk.Button(r4,text='🌙夜间',font=('',8),relief='flat',padx=4,
                   command=lambda: (self.var_theme.set('夜间'),self._on_theme())).pack(side='left',padx=2)
-
+        # <== 新增：伪装编辑器按钮
+        tk.Button(r4,text='📝伪装内容',font=('',8),relief='flat',padx=4, fg='#2b579a',
+                  command=self.open_boss_editor).pack(side='left',padx=6)
     # ─────────────────────────────────────────────────
     # 颜色
     # ─────────────────────────────────────────────────
@@ -10643,6 +10647,188 @@ class App:
         ry = self.root.winfo_y()
         win.geometry(f'480x560+{rx}+{ry}')
 
+    # ─────────────────────────────────────────────────
+    # ★ 终极高保真老板键 (Ctrl+D) —— Word 蓝 & A4 纸比例 ★
+    # ─────────────────────────────────────────────────
+    def open_boss_editor(self):
+        t = self._cur_theme()
+        win = tk.Toplevel(self.root)
+        win.title('编辑伪装文档 (Word 内容)')
+        win.geometry('500x600')
+        win.attributes('-topmost', True)
+        win.configure(bg=t['bg'])
+
+        tk.Label(win, text='在这里输入你希望老板看到的"工作文档"内容：', 
+                 font=('', 9), bg=t['bg'], fg=t['fg'], justify='left').pack(pady=8, padx=10, fill='x')
+
+        text_area = tk.Text(win, font=('Microsoft YaHei', 10), bg='white', fg='black', 
+                            wrap='word', padx=10, pady=10)
+        text_area.pack(fill='both', expand=True, padx=10, pady=5)
+
+        if os.path.exists(BOSS_FILE):
+            with open(BOSS_FILE, 'r', encoding='utf-8') as f:
+                text_area.insert('1.0', f.read())
+        else:
+            text_area.insert('1.0', "项目可行性研究报告\n\n一、 项目背景\n随着市场的不断发展，本季度的核心业务指标呈现出稳健的增长态势。")
+
+        def save_and_close():
+            content = text_area.get('1.0', 'end-1c')
+            with open(BOSS_FILE, 'w', encoding='utf-8') as f: f.write(content)
+            self._toast("📝 伪装文档已保存！")
+            win.destroy()
+
+        btn_f = tk.Frame(win, bg=t['bg'])
+        btn_f.pack(fill='x', pady=10, padx=10)
+        tk.Button(btn_f, text='保存并关闭', font=('', 10, 'bold'), bg=t['sel'], fg=t['fg'], 
+                  relief='flat', padx=15, pady=5, command=save_and_close).pack(side='right')
+
+    def _build_boss_mode_ui(self):
+        self.boss_frame = tk.Frame(self.root, bg='#e1e1e1') 
+        
+        # 1. 顶部蓝色标题栏
+        top_bar = tk.Frame(self.boss_frame, bg='#2b579a', height=30)
+        top_bar.pack(fill='x'); top_bar.pack_propagate(False)
+        tk.Label(top_bar, text='📄 自动保存', font=('Microsoft YaHei', 8), bg='#2b579a', fg='white').pack(side='left', padx=10)
+        tk.Label(top_bar, text='项目研究报告.docx - Word', font=('Microsoft YaHei', 9, 'bold'), bg='#2b579a', fg='white').pack(side='left', expand=True)
+        tk.Label(top_bar, text='_  □  ×', font=('Microsoft YaHei', 9), bg='#2b579a', fg='white').pack(side='right', padx=10)
+
+        # 2. 灰色功能区与选项卡
+        ribbon = tk.Frame(self.boss_frame, bg='#f3f2f1', height=95)
+        ribbon.pack(fill='x'); ribbon.pack_propagate(False)
+        
+        tab_f = tk.Frame(ribbon, bg='#f3f2f1')
+        tab_f.pack(fill='x', padx=5, pady=2)
+        tabs = ['文件', '开始', '插入', '设计', '布局', '引用', '邮件', '审阅', '视图', '帮助', 'AIPPT', 'Acrobat']
+        for i, t in enumerate(tabs):
+            bg_color = 'white' if i == 1 else '#f3f2f1'
+            fg_color = '#2b579a' if i == 1 else '#3b3a39'
+            font_wt = 'bold' if i == 1 else 'normal'
+            tk.Label(tab_f, text=t, font=('Microsoft YaHei', 9, font_wt), bg=bg_color, fg=fg_color, padx=12, pady=4).pack(side='left')
+        
+        # --- 精细化重现 Ribbon 面板 ---
+        tools_f = tk.Frame(ribbon, bg='white')
+        tools_f.pack(fill='both', expand=True)
+
+        def _make_group(parent, text, content_builder):
+            g = tk.Frame(parent, bg='white')
+            g.pack(side='left', fill='y', padx=4, pady=2)
+            c = tk.Frame(g, bg='white')
+            c.pack(expand=True, fill='both')
+            content_builder(c)
+            tk.Label(g, text=text, font=('Microsoft YaHei', 8), fg='#777', bg='white').pack(side='bottom')
+            tk.Frame(parent, width=1, bg='#e1e1e1').pack(side='left', fill='y', pady=4) # 分割线
+
+        def _ai_group(p):
+            tk.Label(p, text='🤖\nOffice AI', font=('Microsoft YaHei', 8), bg='white').pack()
+        _make_group(tools_f, '人工智能', _ai_group)
+
+        def _clipboard_group(p):
+            tk.Label(p, text='📋 粘贴 ▾', font=('Microsoft YaHei', 8), bg='white').pack(side='left', padx=2)
+            rf = tk.Frame(p, bg='white'); rf.pack(side='left')
+            tk.Label(rf, text='✂️ 剪切\n📄 复制', font=('Microsoft YaHei', 8), bg='white', justify='left').pack()
+        _make_group(tools_f, '剪贴板', _clipboard_group)
+
+        def _font_group(p):
+            t = tk.Frame(p, bg='white'); t.pack(anchor='w')
+            tk.Label(t, text='等线 (中文正文) ▾', relief='groove', bd=1, font=('Microsoft YaHei', 8), bg='white').pack(side='left')
+            tk.Label(t, text=' 11 ▾ ', relief='groove', bd=1, font=('Microsoft YaHei', 8), bg='white').pack(side='left', padx=2)
+            tk.Label(t, text='A^ Aˇ', font=('Microsoft YaHei', 8), bg='white').pack(side='left')
+            b = tk.Frame(p, bg='white'); b.pack(anchor='w', pady=2)
+            tk.Label(b, text='B  I  U ▾  ab  x₂ x²  |  A ▾  A ▾', font=('Microsoft YaHei', 8,'bold'), bg='white').pack(side='left')
+        _make_group(tools_f, '字体', _font_group)
+
+        def _para_group(p):
+            tk.Label(p, text='⋮≡ ▾  ½≡ ▾  |  左 中 右 均  |  段落 ▾', font=('Microsoft YaHei', 8), bg='white').pack(pady=4)
+        _make_group(tools_f, '段落', _para_group)
+
+        def _style_group(p):
+            tk.Label(p, text='A\n正文', font=('Microsoft YaHei', 8), bg='#f3f2f1', width=6).pack(side='left', padx=2)
+            tk.Label(p, text='A\n标题1', font=('Microsoft YaHei', 8), bg='white', width=6).pack(side='left', padx=2)
+        _make_group(tools_f, '样式', _style_group)
+
+        def _edit_group(p):
+            tk.Label(p, text='🔍 查找\n✏️ 替换', font=('Microsoft YaHei', 8), bg='white', justify='left').pack()
+        _make_group(tools_f, '编辑', _edit_group)
+
+        def _extra_ai_group(p):
+            tk.Label(p, text='🪄\n论文AI', font=('Microsoft YaHei', 8), bg='white').pack(side='left', padx=4)
+            tk.Label(p, text='💡\nPPT生成', font=('Microsoft YaHei', 8), bg='white').pack(side='left', padx=4)
+        _make_group(tools_f, 'AI扩展', _extra_ai_group)
+
+        # 3. 居中的 A4 纸比例区域 (核心布局优化)
+        # 用一层灰色的 Frame 包裹，然后在内部固定比例的 Frame
+        bg_container = tk.Frame(self.boss_frame, bg='#e1e1e1')
+        bg_container.pack(fill='both', expand=True)
+
+        # A4 比例：宽 210mm x 高 297mm (比例约 1:1.414)
+        # 我们给定一个合适的固定宽高，并在父容器中完全居中 (使用 pack 的 expand)
+        paper_width = 750
+        paper_height = 1060
+        self.paper = tk.Frame(bg_container, bg='white', width=paper_width, height=paper_height, 
+                              highlightbackground='#cccccc', highlightthickness=1)
+        # 通过 padx/pady 控制外边距，expand=True 让它在灰底中绝对居中
+        self.paper.pack(expand=True, pady=15)
+        self.paper.pack_propagate(False) # 锁定大小，不被子组件撑开
+
+        self.boss_text = tk.Text(self.paper, font=('Microsoft YaHei', 11), bg='white', fg='black', 
+                                 wrap='word', relief='flat', padx=60, pady=60, spacing1=6, spacing2=4, spacing3=6)
+        self.boss_text.pack(fill='both', expand=True)
+        
+        # 4. 底部状态栏
+        status_bar = tk.Frame(self.boss_frame, bg='#f3f2f1', height=24)
+        status_bar.pack(fill='x'); status_bar.pack_propagate(False)
+        tk.Label(status_bar, text='第 1 页，共 5 页  |  2430 个字  |  中文(中国)', font=('Microsoft YaHei', 8), bg='#f3f2f1', fg='#3b3a39').pack(side='left', padx=10)
+        tk.Label(status_bar, text='📖 网页视图  |  📄 打印布局  |  🔍 100% ━|━━', font=('Microsoft YaHei', 8), bg='#f3f2f1', fg='#3b3a39').pack(side='right', padx=10)
+
+    def toggle_boss_mode(self, event=None):
+        if not hasattr(self, 'boss_frame'): self._build_boss_mode_ui()
+        self._is_boss_mode = not self._is_boss_mode
+
+        if self._is_boss_mode:
+            self._real_title = self.root.title()
+            self._real_geometry = self.root.geometry() 
+            
+            self.topbar.pack_forget()
+            if self._settings_open: self.setbar.pack_forget()
+            self.sep.pack_forget()
+            self.txt_frame.pack_forget()
+            self.bot_area.pack_forget()
+
+            self._real_alpha = self.root.attributes('-alpha')
+            self.root.attributes('-alpha', 1.0)
+            
+            self.boss_text.config(state='normal')
+            self.boss_text.delete('1.0', 'end')
+            if os.path.exists(BOSS_FILE):
+                with open(BOSS_FILE, 'r', encoding='utf-8') as f:
+                    self.boss_text.insert('1.0', f.read())
+            else:
+                self.boss_text.insert('1.0', "项目研究报告\n\n一、项目背景\n目前项目正在稳步推进中...")
+            self.boss_text.config(state='disabled') 
+
+            # 自动放大为最适合观看 A4 比例屏幕的尺寸
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            w, h = min(1100, sw-40), min(900, sh-60)
+            x, y = (sw - w) // 2, (sh - h) // 2 - 20
+            self.root.geometry(f'{w}x{h}+{x}+{y}')
+
+            self.root.title("项目研究报告.docx - Word")
+            self.root.configure(bg='#e1e1e1')
+            self.boss_frame.pack(fill='both', expand=True)
+            if self._tts_playing: self.toggle_tts()
+        else:
+            self.boss_frame.pack_forget()
+            self.root.geometry(self._real_geometry)
+            self.root.title(self._real_title)
+            self.root.attributes('-alpha', getattr(self, '_real_alpha', 1.0))
+            self._apply_theme() 
+            
+            self.topbar.pack(fill='x')
+            if self._settings_open: self.setbar.pack(fill='x')
+            self.sep.pack(fill='x')
+            self.txt_frame.pack(fill='both', expand=True)
+            self.bot_area.pack(fill='x', side='bottom')
     # ─────────────────────────────────────────────────
     # 章节摘要（Ctrl+M）—— 调用智谱 GLM API
     # ─────────────────────────────────────────────────
@@ -11540,6 +11726,9 @@ class App:
         r.bind('<Control-M>',    lambda e: self.open_summary())
         r.bind('<Control-g>',    lambda e: self.open_chapter_finder())
         r.bind('<Control-G>',    lambda e: self.open_chapter_finder())
+        # 新增：老板键快捷键 Ctrl + D
+        r.bind('<Control-d>',    self.toggle_boss_mode)
+        r.bind('<Control-D>',    self.toggle_boss_mode)
         r.bind('<KeyPress-d>',   self._dp)
         r.bind('<KeyPress-D>',   self._dp)
         r.bind('<KeyRelease-d>', self._dr)

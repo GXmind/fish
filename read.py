@@ -12149,6 +12149,9 @@ SHELF_FILE = os.path.join(DATA_DIR, 'shelf.json')
 NOTES_FILE = os.path.join(DATA_DIR, 'notes.json')
 MARKS_FILE = os.path.join(DATA_DIR, 'marks.json')
 BOSS_FILE  = os.path.join(DATA_DIR, 'boss_text.txt')  # <== 新增这一行：伪装文档的保存路径
+# 数据存储 (在原有基础上增加)
+PROFILES_DIR = os.path.join(DATA_DIR, 'profiles')
+os.makedirs(PROFILES_DIR, exist_ok=True)
 def _jload(f):
     try:
         with open(f, encoding='utf-8') as fp: return json.load(fp)
@@ -12221,6 +12224,50 @@ def _get_api_key(model_type):
             if key: return key
         except: pass
     return os.environ.get(env_var, '')
+# ══════════════════════════════════════════════════════════════
+# 健壮的 API 调用 (支持指数退避重试)
+# ══════════════════════════════════════════════════════════════
+def _robust_api_call(model_type, messages, max_retries=3, timeout=40):
+    import time
+    import urllib.request as _ureq
+    import urllib.error as _uerr
+    import json as _ujson
+    
+    key = _get_api_key(model_type)
+    if not key: return False, "NO_KEY"
+    
+    url = 'https://api.minimax.chat/v1/chat/completions' if model_type == 'MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+    model_name = 'abab6.5s-chat' if model_type == 'MiniMax' else 'glm-4-flash'
+    
+    payload = _ujson.dumps({
+        "model": model_name,
+        "messages": messages,
+        "temperature": 0.6
+    }).encode('utf-8')
+    
+    req = _ureq.Request(url, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}, method='POST')
+    
+    for attempt in range(max_retries):
+        try:
+            with _ureq.urlopen(req, timeout=timeout) as resp:
+                data = _ujson.loads(resp.read().decode('utf-8'))
+                return True, data['choices'][0]['message']['content']
+        except _uerr.HTTPError as e:
+            if e.code == 429: # 触发速率限制 (Too Many Requests)
+                wait_time = (attempt + 1) * 3 # 阶梯延迟: 3s, 6s, 9s
+                time.sleep(wait_time)
+                continue
+            else:
+                err_msg = e.read().decode('utf-8', errors='replace')
+                return False, f"HTTP {e.code}: {err_msg[:100]}"
+        except Exception as e:
+            # 捕获网络抖动或超时
+            time.sleep(2)
+            if attempt == max_retries - 1:
+                return False, f"网络错误: {str(e)}"
+            continue
+            
+    return False, "请求太频繁或网络持续拥堵，已超过最大重试次数"
 
 # ══════════════════════════════════════════════════════════════
 # TTS 引擎（可选）
@@ -12494,6 +12541,7 @@ class App:
         self._tbtn(rbf, '笔记', self.open_notes)
         self._tbtn(rbf, '书签', self.open_marks)
         self._tbtn(rbf, '打开', self.open_file)
+        self._tbtn(rbf, '对话', self.open_role_chat)
         self._tbtn(rbf, '×',   r.destroy)
 
         for w in (self.topbar, self.lbl_title):
@@ -13917,7 +13965,176 @@ class App:
         _rx = self.root.winfo_x() + self.root.winfo_width() + 10
         _ry = self.root.winfo_y()
         dlg.geometry(f'500x620+{_rx}+{_ry}')
+    # ─────────────────────────────────────────────────
+    # 角色画像缓存机制 (App 类方法)
+    # ─────────────────────────────────────────────────
+    def _get_or_create_profile(self, role_name, update_ui_cb):
+        """获取或生成角色画像，大幅降低后续对话的 Token 消耗"""
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", self.book_title)
+        safe_role = re.sub(r'[\\/*?:"<>|]', "", role_name)
+        profile_path = os.path.join(PROFILES_DIR, f"{safe_title}_{safe_role}.txt")
+        
+        # 1. 命中缓存，直接读取返回
+        if os.path.exists(profile_path):
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                return f.read()
+                
+        # 2. 未命中缓存，需要提取上下文生成画像
+        update_ui_cb(f"系统", f"正在深度分析【{role_name}】的性格与语言习惯，首次分析需要几十秒，请稍候...")
+        
+        # 提取当前章节及前面几章的文本（防止剧透，且限制长度防越界）
+        start_ch = max(0, self.cur_ch - 5)
+        context = "\n".join([c['body'] for c in self.chapters[start_ch:self.cur_ch + 1]])
+        context = context[-8000:] # 取最近的8000字作为分析材料
+        
+        sys_prompt = (
+            f"你是一个专业的文学角色分析师。请根据以下截取的小说内容，提取角色【{role_name}】的深度画像，包括：\n"
+            f"1. 核心性格特征\n"
+            f"2. 标志性的说话口癖与语气（举例说明）\n"
+            f"3. 对其他关键人物的态度与人际关系\n"
+            f"字数严格控制在500字以内，直接输出画像，不需要任何寒暄。"
+        )
+        
+        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"小说片段：\n{context}"}]
+        success, result = _robust_api_call(self.var_ai_model.get(), messages, max_retries=2, timeout=60)
+        
+        if success:
+            with open(profile_path, 'w', encoding='utf-8') as f:
+                f.write(result)
+            return result
+        else:
+            return f"ERROR:{result}"
 
+    # ─────────────────────────────────────────────────
+    # 角色对话窗口 (App 类方法)
+    # ─────────────────────────────────────────────────
+    def open_role_chat(self):
+        if not self.chapters:
+            messagebox.showinfo('提示', '请先打开小说'); return
+
+        t = self._cur_theme()
+        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+        win = tk.Toplevel(self.root)
+        win.title('与角色跨时空对话')
+        win.geometry('450x600')
+        win.attributes('-topmost', True)
+        win.configure(bg=bg)
+
+        chat_history = [] # 维护多轮对话的上下文
+
+        # ── 顶部 ──
+        top = tk.Frame(win, bg=bar, height=40)
+        top.pack(fill='x')
+        tk.Label(top, text='对话角色:', font=('', 9, 'bold'), bg=bar, fg=fg).pack(side='left', padx=10)
+        
+        role_var = tk.StringVar(value="")
+        role_ent = tk.Entry(top, textvariable=role_var, width=12, font=('', 9), bg=bg, fg=fg, insertbackground=fg)
+        role_ent.pack(side='left', padx=5, pady=8)
+        
+        # ── 聊天显示区 ──
+        chat_frame = tk.Frame(win, bg=bg)
+        chat_frame.pack(fill='both', expand=True, padx=8, pady=8)
+        
+        chat_display = scrolledtext.ScrolledText(
+            chat_frame, font=(self.font_fam, self.font_size), 
+            bg=bg, fg=fg, state='disabled', wrap='word', borderwidth=0, highlightthickness=0, spacing1=4, spacing3=4
+        )
+        chat_display.pack(fill='both', expand=True)
+        chat_display.tag_config('name', font=(self.font_fam, self.font_size, 'bold'), foreground=sel)
+        chat_display.tag_config('sys', font=(self.font_fam, self.font_size - 1, 'italic'), foreground='#888')
+
+        # ── 底部输入区 ──
+        bot = tk.Frame(win, bg=bar)
+        bot.pack(fill='x', side='bottom')
+        
+        msg_ent = tk.Entry(bot, font=(self.font_fam, self.font_size), bg=bg, fg=fg, insertbackground=fg, relief='flat')
+        msg_ent.pack(fill='x', padx=10, pady=10, side='left', expand=True, ipady=4)
+
+        btn_send = tk.Button(bot, text="发送", font=('', 9, 'bold'), bg=fg, fg=bg, activebackground=sel, relief='flat', cursor='hand2')
+        btn_send.pack(side='right', padx=10, pady=10, ipadx=10)
+
+        # ── 核心逻辑 ──
+        def append_msg(who, text, tag='name'):
+            chat_display.config(state='normal')
+            if tag == 'sys':
+                chat_display.insert('end', f"{who}: {text}\n\n", 'sys')
+            else:
+                chat_display.insert('end', f"[{who}] ", 'name')
+                chat_display.insert('end', f"{text}\n\n")
+            chat_display.config(state='disabled')
+            chat_display.see('end')
+
+        def set_ui_state(enabled=True):
+            """防止连点引起的并发错误"""
+            state = 'normal' if enabled else 'disabled'
+            msg_ent.config(state=state)
+            btn_send.config(state=state)
+            role_ent.config(state=state)
+            if enabled: msg_ent.focus()
+
+        def do_send(e=None):
+            role = role_var.get().strip()
+            user_text = msg_ent.get().strip()
+            if not role or not user_text: return
+            if btn_send['state'] == 'disabled': return # 防抖
+            
+            msg_ent.delete(0, 'end')
+            set_ui_state(False)
+            append_msg("我", user_text)
+
+            def ai_worker():
+                # 1. 获取或生成角色画像（重点优化：节约Token并保证准确性）
+                profile = self._get_or_create_profile(role, append_msg)
+                if profile.startswith("ERROR:"):
+                    win.after(0, lambda: append_msg("系统", f"获取角色画像失败 -> {profile}", 'sys'))
+                    win.after(0, lambda: set_ui_state(True))
+                    return
+
+                # 2. 构建 System Prompt
+                system_prompt = (
+                    f"你正在沉浸式扮演小说角色：【{role}】。\n"
+                    f"【你的深度画像】:\n{profile}\n\n"
+                    f"【扮演规则】:\n"
+                    f"1. 完全沉浸在角色中，绝不承认自己是AI。语言风格、口癖必须与画像一致。\n"
+                    f"2. 严禁剧透未来的事情，你只知道过去和现在发生的事。\n"
+                    f"3. 保持一问一答的简短对话感，每次回复不超过3句话。\n"
+                    f"4. 绝不使用侮辱、歧视、血腥暴力等违规词汇，保持友好或符合人设的克制交流。"
+                )
+                
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(chat_history)
+                messages.append({"role": "user", "content": user_text})
+
+                # 3. 发起请求
+                success, resp = _robust_api_call(self.var_ai_model.get(), messages)
+                
+                win.after(0, lambda: _handle_resp(success, resp, user_text))
+
+            def _handle_resp(success, resp, user_text):
+                if success:
+                    # 维护上下文窗口（保留最近8条记录，避免溢出）
+                    chat_history.append({"role": "user", "content": user_text})
+                    chat_history.append({"role": "assistant", "content": resp})
+                    if len(chat_history) > 8:
+                        chat_history.pop(0); chat_history.pop(0)
+                        
+                    append_msg(role, resp)
+                else:
+                    if resp == "NO_KEY":
+                        append_msg("系统", "请先在设置所在目录配置 API Key 文件。", 'sys')
+                    else:
+                        append_msg("系统", f"对话失败 -> {resp}", 'sys')
+                
+                set_ui_state(True)
+
+            threading.Thread(target=ai_worker, daemon=True).start()
+
+        btn_send.config(command=do_send)
+        msg_ent.bind('<Return>', do_send)
+
+        append_msg("系统", "已就绪。输入角色名，然后发送消息即可开始对话。系统会自动分析并记住该角色的性格。", 'sys')
+        role_ent.focus()
 
     # ─────────────────────────────────────────────────
     # ★ 终极高保真老板键 (Ctrl+D) —— Word 蓝 & A4 纸比例 ★

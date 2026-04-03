@@ -400,7 +400,7 @@ class Match3Pro:
             self.combo = 1
             self.delete_cells(to_del)
             self.do_fall_and_refill()
-            self.process_chain()
+            self.process_chain()  # 统一走process_chain的结束判断
         elif self.find_all_matches():
             self.steps -= 1
             self.combo = 0
@@ -413,60 +413,84 @@ class Match3Pro:
             self.busy = False
 
     def process_chain(self, last_swap_pos=None):
-        """逐波消除，含道具生成"""
+        """逐波消除，含道具生成。
+        规则：
+          - 特殊道具留在棋盘，不会因为普通三消而自动触发。
+          - 只有当特殊道具本身参与了这次匹配（颜色连线），才触发效果。
+          - 4消/5消/十字 在 last_swap_pos 处生成新特殊道具，留给玩家使用。
+        """
         while True:
-            lines  = self.find_match_lines()
-            if not lines: break
+            lines = self.find_match_lines()
+            if not lines:
+                break
 
             all_matched = set()
             for ln in lines:
                 all_matched.update(ln["cells"])
-            if not all_matched: break
+            if not all_matched:
+                break
 
             self.combo += 1
-            to_del = self.collect_special_triggers(all_matched)
 
-            # 道具生成
+            # ---- 道具生成判断（在删除前读颜色）----
             new_specials = {}  # (r,c) -> new_val
             if last_swap_pos:
                 sr, sc = last_swap_pos
-                # 找包含 swap 位置的线段
                 for ln in lines:
                     if (sr, sc) in ln["cells"]:
                         n = len(ln["cells"])
                         bc = self.base_color(self.grid[sr][sc])
-                        if bc < 0: bc = 0
-                        if n >= 5:
-                            new_specials[(sr, sc)] = SPECIAL_RAINBOW
-                        elif n == 4:
-                            new_specials[(sr, sc)] = (SPECIAL_ROW if ln["dir"] == "h" else SPECIAL_COL) + bc
-                        # 十字/T型（同时出现横纵相交）
-                        # 检测是否在两条线的交叉点
-                        cross = [l for l in lines if (sr, sc) in l["cells"] and l != ln]
+                        if bc < 0:
+                            bc = 0
+                        # 十字优先（横纵同时有这格）
+                        cross = [l for l in lines
+                                 if (sr, sc) in l["cells"] and l["dir"] != ln["dir"]]
                         if cross:
                             new_specials[(sr, sc)] = SPECIAL_BOMB + bc
+                        elif n >= 5:
+                            new_specials[(sr, sc)] = SPECIAL_RAINBOW
+                        elif n == 4:
+                            new_specials[(sr, sc)] = (
+                                SPECIAL_ROW if ln["dir"] == "h" else SPECIAL_COL
+                            ) + bc
                         break
 
-            # 先把新特殊道具位置从删除集合移除
-            for pos in new_specials:
-                to_del.discard(pos)
+            # ---- 确定要删除的格子：只删普通格，特殊道具参与匹配时才触发 ----
+            to_del = set(all_matched) - set(new_specials.keys())
+
+            # 被匹配到的特殊道具 → 触发连锁
+            for r, c in list(all_matched):
+                if (r, c) in new_specials:
+                    continue
+                sp = self.special_type(self.grid[r][c])
+                if sp != SPECIAL_NONE:
+                    extra = self.collect_special_triggers({(r, c)})
+                    to_del.update(extra)
 
             score_gain = len(to_del) * 20 * self.combo
             self.score += score_gain
             self.spawn_score_popup(score_gain, to_del)
 
             self.delete_cells(to_del)
-            # 生成新道具
-            for (r, c), val in new_specials.items():
-                self.grid[r][c] = val
-                self.anims[r][c].start_spawn()
+
+            # 生成新道具并渲染足够帧让玩家看清
+            if new_specials:
+                for (r, c), val in new_specials.items():
+                    self.grid[r][c] = val
+                    self.anims[r][c].start_spawn(0.4)
+                self._render_frames(35)
 
             self.do_fall_and_refill()
             last_swap_pos = None
 
-        # 步数清零或达标 → 进入结算
-        if self.steps <= 0 or self.score >= self.target:
+        # 结算判断：
+        # - 三星达到 (>= target*2) 且还有剩余步数 → 步数奖励
+        # - 步数用完 → 直接结算
+        # - 一/二星达标但步数未用完 → 继续游戏（让玩家用完步数冲更高分）
+        if self.score >= self.target * 2 and self.steps > 0:
             self.start_bonus_phase()
+        elif self.steps <= 0:
+            self._finish_level()
         else:
             self.busy = False
 
@@ -528,38 +552,60 @@ class Match3Pro:
 
     # ============================================================= 结算阶段 ==
     def start_bonus_phase(self):
-        self.state = "SETTLING"
-        self.busy   = True
-        self._bonus_queue = list(range(self.steps))
-        self.steps = 0
-        self._do_next_bonus()
-
-    def _do_next_bonus(self):
-        if not self._bonus_queue:
+        if self.steps <= 0:
             self._finish_level()
             return
-        self._bonus_queue.pop(0)
+        self.state = "SETTLING"
+        self.busy = True
 
-        # 随机一格变特殊
-        while True:
-            br = random.randint(0, GRID_SIZE-1)
-            bc_idx = random.randint(0, GRID_SIZE-1)
-            if self.grid[br][bc_idx] >= 0:
-                bc = self.base_color(self.grid[br][bc_idx])
-                if bc < 0: bc = 0
-                sp_type = random.choice([SPECIAL_ROW, SPECIAL_COL, SPECIAL_BOMB])
-                self.grid[br][bc_idx] = sp_type + bc
-                self.anims[br][bc_idx].start_spawn(0.3)
-                self._render_frames(20)
-                to_del = self.collect_special_triggers({(br, bc_idx)})
-                score_gain = len(to_del) * 20
-                self.score += score_gain
-                self.spawn_score_popup(score_gain, to_del)
-                self.delete_cells(to_del)
-                self.do_fall_and_refill()
-                self.process_chain_silent()
+        remaining = self.steps
+        self.steps = 0
+
+        # === 第一阶段：把所有剩余步数随机变成特殊道具，逐个弹出 ===
+        available = [(r, c) for r in range(GRID_SIZE)
+                     for c in range(GRID_SIZE)
+                     if self.grid[r][c] >= 0 and
+                        self.special_type(self.grid[r][c]) == SPECIAL_NONE]
+        random.shuffle(available)
+
+        bonus_positions = []
+        for i in range(remaining):
+            if not available:
+                available = [(r, c) for r in range(GRID_SIZE)
+                             for c in range(GRID_SIZE)
+                             if self.grid[r][c] >= 0 and
+                                self.special_type(self.grid[r][c]) == SPECIAL_NONE]
+                random.shuffle(available)
+            if not available:
                 break
-        self._do_next_bonus()
+
+            br, bc_idx = available.pop(0)
+            bc = self.base_color(self.grid[br][bc_idx])
+            if bc < 0:
+                bc = 0
+            sp_type = random.choice([SPECIAL_ROW, SPECIAL_COL, SPECIAL_BOMB,
+                                      SPECIAL_BOMB, SPECIAL_RAINBOW])
+            new_val = SPECIAL_RAINBOW if sp_type == SPECIAL_RAINBOW else sp_type + bc
+            self.grid[br][bc_idx] = new_val
+            self.anims[br][bc_idx].start_spawn(0.35)
+            bonus_positions.append((br, bc_idx))
+            # 每个道具逐个弹出，给玩家时间看清楚
+            self._render_frames(18)
+
+        # 全部生成后停顿，让玩家欣赏一下
+        self._render_frames(50)
+
+        # === 第二阶段：统一触发所有奖励道具 ===
+        if bonus_positions:
+            all_to_del = self.collect_special_triggers(set(bonus_positions))
+            score_gain = len(all_to_del) * 20
+            self.score += score_gain
+            self.spawn_score_popup(score_gain, all_to_del)
+            self.delete_cells(all_to_del)
+            self.do_fall_and_refill()
+            self.process_chain_silent()
+
+        self._finish_level()
 
     def process_chain_silent(self):
         """结算时不生成新道具的连锁消除"""

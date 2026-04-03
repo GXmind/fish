@@ -253,36 +253,47 @@ class Match3Pro:
         return matched
 
     def find_match_lines(self):
-        """返回所有连续相同色的线段（用于判断4消/5消及方向）"""
-        lines = []  # list of {cells, direction}
+        """返回所有连续相同色的线段（用于判断4消/5消及方向）。
+        特殊道具参与颜色匹配（用 base_color 比较），-1 空格断开。
+        """
+        lines = []
+
+        def flush(run, direction):
+            if len(run) >= 3:
+                lines.append({"cells": run[:], "dir": direction})
+
         # 横向
         for r in range(GRID_SIZE):
             run = []
             for c in range(GRID_SIZE):
                 v = self.grid[r][c]
-                if v < 0:
-                    if len(run) >= 3: lines.append({"cells": run[:], "dir": "h"})
-                    run = []
-                elif run and self.base_color(v) != self.base_color(self.grid[run[-1][0]][run[-1][1]]):
-                    if len(run) >= 3: lines.append({"cells": run[:], "dir": "h"})
-                    run = [(r, c)]
+                bc = self.base_color(v)
+                if bc < 0:                          # 空格或彩虹断开
+                    flush(run, "h"); run = []
+                elif not run:
+                    run = [(r, c)]                  # 行首/断后第一个
+                elif bc != self.base_color(self.grid[run[-1][0]][run[-1][1]]):
+                    flush(run, "h"); run = [(r, c)] # 颜色变了
                 else:
                     run.append((r, c))
-            if len(run) >= 3: lines.append({"cells": run[:], "dir": "h"})
+            flush(run, "h")
+
         # 纵向
         for c in range(GRID_SIZE):
             run = []
             for r in range(GRID_SIZE):
                 v = self.grid[r][c]
-                if v < 0:
-                    if len(run) >= 3: lines.append({"cells": run[:], "dir": "v"})
-                    run = []
-                elif run and self.base_color(v) != self.base_color(self.grid[run[-1][0]][run[-1][1]]):
-                    if len(run) >= 3: lines.append({"cells": run[:], "dir": "v"})
+                bc = self.base_color(v)
+                if bc < 0:
+                    flush(run, "v"); run = []
+                elif not run:
                     run = [(r, c)]
+                elif bc != self.base_color(self.grid[run[-1][0]][run[-1][1]]):
+                    flush(run, "v"); run = [(r, c)]
                 else:
                     run.append((r, c))
-            if len(run) >= 3: lines.append({"cells": run[:], "dir": "v"})
+            flush(run, "v")
+
         return lines
 
     def collect_special_triggers(self, matched_cells):
@@ -303,11 +314,18 @@ class Match3Pro:
                 for rr in range(GRID_SIZE):
                     to_del.add((rr, c)); queue.append((rr, c))
             elif sp == SPECIAL_BOMB:
+                # 炸弹：菱形范围（曼哈顿距离 <= 2）
+                #   X
+                #  XXX
+                # XXXXX
+                #  XXX
+                #   X
                 for dr in range(-2, 3):
                     for dc in range(-2, 3):
-                        nr, nc = r+dr, c+dc
-                        if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
-                            to_del.add((nr, nc)); queue.append((nr, nc))
+                        if abs(dr) + abs(dc) <= 2:
+                            nr, nc = r + dr, c + dc
+                            if 0 <= nr < GRID_SIZE and 0 <= nc < GRID_SIZE:
+                                to_del.add((nr, nc)); queue.append((nr, nc))
             elif sp == SPECIAL_RAINBOW:
                 # 全消某色 —— 选最多的普通色
                 color_counts = {}
@@ -436,24 +454,41 @@ class Match3Pro:
             new_specials = {}  # (r,c) -> new_val
             if last_swap_pos:
                 sr, sc = last_swap_pos
-                for ln in lines:
-                    if (sr, sc) in ln["cells"]:
-                        n = len(ln["cells"])
-                        bc = self.base_color(self.grid[sr][sc])
-                        if bc < 0:
-                            bc = 0
-                        # 十字优先（横纵同时有这格）
-                        cross = [l for l in lines
-                                 if (sr, sc) in l["cells"] and l["dir"] != ln["dir"]]
-                        if cross:
-                            new_specials[(sr, sc)] = SPECIAL_BOMB + bc
-                        elif n >= 5:
-                            new_specials[(sr, sc)] = SPECIAL_RAINBOW
-                        elif n == 4:
-                            new_specials[(sr, sc)] = (
-                                SPECIAL_ROW if ln["dir"] == "h" else SPECIAL_COL
-                            ) + bc
-                        break
+                # 找所有包含 swap 位置的线段
+                swap_lines = [l for l in lines if (sr, sc) in l["cells"]]
+                if swap_lines:
+                    # 颜色：从同行其他格子读取（避免 swap 格本身是特殊道具）
+                    bc = -1
+                    for sl in swap_lines:
+                        for (rr, cc) in sl["cells"]:
+                            candidate = self.base_color(self.grid[rr][cc])
+                            if candidate >= 0:
+                                bc = candidate
+                                break
+                        if bc >= 0:
+                            break
+                    if bc < 0:
+                        bc = 0
+
+                    h_lines = [l for l in swap_lines if l["dir"] == "h"]
+                    v_lines = [l for l in swap_lines if l["dir"] == "v"]
+                    has_cross = bool(h_lines and v_lines)  # 十字/T/L形
+
+                    max_h = max((len(l["cells"]) for l in h_lines), default=0)
+                    max_v = max((len(l["cells"]) for l in v_lines), default=0)
+                    max_n = max(max_h, max_v)
+
+                    if has_cross:
+                        # T/十字/L → 炸弹
+                        new_specials[(sr, sc)] = SPECIAL_BOMB + bc
+                    elif max_n >= 5:
+                        new_specials[(sr, sc)] = SPECIAL_RAINBOW
+                    elif max_n == 4:
+                        # 哪个方向是4消就生成对应道具
+                        if max_h == 4:
+                            new_specials[(sr, sc)] = SPECIAL_ROW + bc
+                        else:
+                            new_specials[(sr, sc)] = SPECIAL_COL + bc
 
             # ---- 确定要删除的格子：只删普通格，特殊道具参与匹配时才触发 ----
             to_del = set(all_matched) - set(new_specials.keys())
@@ -507,31 +542,43 @@ class Match3Pro:
         self._render_frames(18)
 
     def do_fall_and_refill(self):
-        """掉落：先留空白几帧，再逐步下落"""
+        """掉落：按列计算最终位置后一次性移动，避免颜色闪烁。"""
         # 1. 展示空白格子状态
         self._render_frames(6)
 
-        # 2. 逐格掉落（每次最多下落1格，循环直到稳定）
-        while True:
-            moved = False
-            for c in range(GRID_SIZE):
-                for r in range(GRID_SIZE - 1, 0, -1):
-                    if self.grid[r][c] == -1 and self.grid[r-1][c] != -1:
-                        self.grid[r][c]   = self.grid[r-1][c]
-                        self.grid[r-1][c] = -1
-                        self.anims[r][c].start_fall(-TILE_SIZE)
-                        moved = True
-            if not moved:
-                break
-            self._render_frames(12)
-
-        # 3. 顶部生成新方块
+        # 2. 逐列处理：记录原始位置 → 一次性落到最终位置
         for c in range(GRID_SIZE):
+            # 收集当前列非空格（含特殊道具），记录原始行号
+            col_vals = []   # (original_row, value)
             for r in range(GRID_SIZE):
-                if self.grid[r][c] == -1:
-                    self.grid[r][c] = random.randint(0, 5)
-                    self.anims[r][c].start_spawn()
-        self._render_frames(15)
+                if self.grid[r][c] != -1:
+                    col_vals.append((r, self.grid[r][c]))
+
+            empty_count = GRID_SIZE - len(col_vals)
+
+            # 先清空整列
+            for r in range(GRID_SIZE):
+                self.grid[r][c] = -1
+
+            # 现有方块落到底部（从底往上填）
+            for i, (orig_r, val) in enumerate(reversed(col_vals)):
+                dest_r = GRID_SIZE - 1 - i
+                self.grid[dest_r][c] = val
+                fall_dist = dest_r - orig_r   # 正值=往下落
+                if fall_dist > 0:
+                    self.anims[dest_r][c].start_fall(-fall_dist * TILE_SIZE)
+                # fall_dist==0 说明没动，不需要动画
+
+            # 顶部生成新方块，从屏幕上方落入
+            for i in range(empty_count):
+                r = i
+                self.grid[r][c] = random.randint(0, 5)
+                # 从屏幕外落入：偏移 = -(empty_count - i) 格
+                fall_px = -(empty_count - i) * TILE_SIZE
+                self.anims[r][c].start_fall(fall_px)
+
+        # 3. 渲染落下动画
+        self._render_frames(22)
 
     def _render_frames(self, n):
         """渲染 n 帧，驱动动画"""
@@ -703,13 +750,17 @@ class Match3Pro:
             pygame.draw.polygon(surf, white, [(cx, tile_h-4), (cx-4, tile_h-10), (cx+4, tile_h-10)])
 
         elif sp == SPECIAL_BOMB:
-            # 炸弹：十字+斜线
-            for angle in range(0, 360, 45):
-                rad = math.radians(angle)
-                ex = cx + int(math.cos(rad) * 10)
-                ey = cy + int(math.sin(rad) * 10)
-                pygame.draw.line(surf, white, (cx, cy), (ex, ey), 2)
-            pygame.draw.circle(surf, white, (cx, cy), 6, 2)
+            # 炸弹图标：菱形轮廓
+            pts = [
+                (cx,      cy - 14),   # 上
+                (cx + 14, cy),         # 右
+                (cx,      cy + 14),   # 下
+                (cx - 14, cy),         # 左
+            ]
+            pygame.draw.polygon(surf, white, pts, 2)
+            # 中间小十字
+            pygame.draw.line(surf, white, (cx-5, cy), (cx+5, cy), 2)
+            pygame.draw.line(surf, white, (cx, cy-5), (cx, cy+5), 2)
 
         elif sp == SPECIAL_RAINBOW:
             # 彩虹：旋转彩色圆环

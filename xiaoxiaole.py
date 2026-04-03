@@ -393,22 +393,18 @@ class Match3Pro:
         to_del = set()
 
         if sp1 == SPECIAL_RAINBOW and sp2 == SPECIAL_RAINBOW:
-            # 双彩虹 —— 清全场
             to_del = {(rr, cc) for rr in range(GRID_SIZE) for cc in range(GRID_SIZE)}
             direct_trigger = True
         elif sp1 == SPECIAL_RAINBOW or sp2 == SPECIAL_RAINBOW:
             if sp1 != SPECIAL_NONE or sp2 != SPECIAL_NONE:
                 to_del = self.rainbow_combine_with_special(r1, c1, r2, c2)
-                direct_trigger = True
             else:
                 to_del = self.collect_special_triggers({(r1, c1), (r2, c2)})
-                direct_trigger = True
+            direct_trigger = True
         elif (sp1 != SPECIAL_NONE) and (sp2 != SPECIAL_NONE):
-            # 两个普通特殊道具相交换 —— 合并触发
             to_del = self.collect_special_triggers({(r1, c1), (r2, c2)})
             direct_trigger = True
         elif sp1 != SPECIAL_NONE or sp2 != SPECIAL_NONE:
-            # 特殊 + 普通：触发特殊
             sp_r, sp_c = (r1, c1) if sp1 != SPECIAL_NONE else (r2, c2)
             to_del = self.collect_special_triggers({(sp_r, sp_c)})
             direct_trigger = True
@@ -416,13 +412,18 @@ class Match3Pro:
         if direct_trigger and to_del:
             self.steps -= 1
             self.combo = 1
+            # ★ 计算并加分
+            score_gain = len(to_del) * 20 * self.combo
+            self.score += score_gain
+            self.spawn_score_popup(score_gain, to_del)
             self.delete_cells(to_del)
             self.do_fall_and_refill()
-            self.process_chain()  # 统一走process_chain的结束判断
+            self.process_chain()
         elif self.find_all_matches():
             self.steps -= 1
             self.combo = 0
-            self.process_chain((r1, c1))
+            # 交换后两个格子都可能参与匹配，传入两个候选位置
+            self.process_chain(swap_candidates=[(r1, c1), (r2, c2)])
         else:
             # 无效交换 —— 回退动画
             self.grid[r1][c1], self.grid[r2][c2] = self.grid[r2][c2], self.grid[r1][c1]
@@ -430,12 +431,52 @@ class Match3Pro:
             self.anims[r2][c2].start_swap((c2 - c1) * TILE_SIZE,  (r2 - r1) * TILE_SIZE)
             self.busy = False
 
-    def process_chain(self, last_swap_pos=None):
+    def _detect_special_creation(self, candidates, lines):
+        """从候选格子中找出应该生成特殊道具的格子和类型。
+        candidates: [(r,c), ...] 本次交换的两个格子
+        lines: find_match_lines() 的结果
+        返回 dict {(r,c): new_val}
+        """
+        new_specials = {}
+        for sr, sc in candidates:
+            swap_lines = [l for l in lines if (sr, sc) in l["cells"]]
+            if not swap_lines:
+                continue
+
+            # 读颜色：从匹配线中找第一个有效 base_color
+            bc = -1
+            for sl in swap_lines:
+                for (rr, cc) in sl["cells"]:
+                    candidate_bc = self.base_color(self.grid[rr][cc])
+                    if candidate_bc >= 0:
+                        bc = candidate_bc
+                        break
+                if bc >= 0:
+                    break
+            if bc < 0:
+                bc = 0
+
+            h_lines = [l for l in swap_lines if l["dir"] == "h"]
+            v_lines = [l for l in swap_lines if l["dir"] == "v"]
+            has_cross = bool(h_lines and v_lines)
+
+            max_h = max((len(l["cells"]) for l in h_lines), default=0)
+            max_v = max((len(l["cells"]) for l in v_lines), default=0)
+            max_n = max(max_h, max_v)
+
+            if has_cross:
+                new_specials[(sr, sc)] = SPECIAL_BOMB + bc
+            elif max_n >= 5:
+                new_specials[(sr, sc)] = SPECIAL_RAINBOW
+            elif max_n == 4:
+                new_specials[(sr, sc)] = (SPECIAL_ROW if max_h == 4 else SPECIAL_COL) + bc
+            # max_n == 3：普通三消，不生成道具
+
+        return new_specials
+
+    def process_chain(self, swap_candidates=None):
         """逐波消除，含道具生成。
-        规则：
-          - 特殊道具留在棋盘，不会因为普通三消而自动触发。
-          - 只有当特殊道具本身参与了这次匹配（颜色连线），才触发效果。
-          - 4消/5消/十字 在 last_swap_pos 处生成新特殊道具，留给玩家使用。
+        swap_candidates: [(r1,c1),(r2,c2)] 本次交换的两个格子位置，用于判断4消/5消
         """
         while True:
             lines = self.find_match_lines()
@@ -451,44 +492,9 @@ class Match3Pro:
             self.combo += 1
 
             # ---- 道具生成判断（在删除前读颜色）----
-            new_specials = {}  # (r,c) -> new_val
-            if last_swap_pos:
-                sr, sc = last_swap_pos
-                # 找所有包含 swap 位置的线段
-                swap_lines = [l for l in lines if (sr, sc) in l["cells"]]
-                if swap_lines:
-                    # 颜色：从同行其他格子读取（避免 swap 格本身是特殊道具）
-                    bc = -1
-                    for sl in swap_lines:
-                        for (rr, cc) in sl["cells"]:
-                            candidate = self.base_color(self.grid[rr][cc])
-                            if candidate >= 0:
-                                bc = candidate
-                                break
-                        if bc >= 0:
-                            break
-                    if bc < 0:
-                        bc = 0
-
-                    h_lines = [l for l in swap_lines if l["dir"] == "h"]
-                    v_lines = [l for l in swap_lines if l["dir"] == "v"]
-                    has_cross = bool(h_lines and v_lines)  # 十字/T/L形
-
-                    max_h = max((len(l["cells"]) for l in h_lines), default=0)
-                    max_v = max((len(l["cells"]) for l in v_lines), default=0)
-                    max_n = max(max_h, max_v)
-
-                    if has_cross:
-                        # T/十字/L → 炸弹
-                        new_specials[(sr, sc)] = SPECIAL_BOMB + bc
-                    elif max_n >= 5:
-                        new_specials[(sr, sc)] = SPECIAL_RAINBOW
-                    elif max_n == 4:
-                        # 哪个方向是4消就生成对应道具
-                        if max_h == 4:
-                            new_specials[(sr, sc)] = SPECIAL_ROW + bc
-                        else:
-                            new_specials[(sr, sc)] = SPECIAL_COL + bc
+            new_specials = {}
+            if swap_candidates:
+                new_specials = self._detect_special_creation(swap_candidates, lines)
 
             # ---- 确定要删除的格子：只删普通格，特殊道具参与匹配时才触发 ----
             to_del = set(all_matched) - set(new_specials.keys())
@@ -501,6 +507,11 @@ class Match3Pro:
                 if sp != SPECIAL_NONE:
                     extra = self.collect_special_triggers({(r, c)})
                     to_del.update(extra)
+
+            # 如果新道具位置也被连锁删除范围覆盖，取消在该位置生成道具
+            for pos in list(new_specials.keys()):
+                if pos in to_del:
+                    del new_specials[pos]
 
             score_gain = len(to_del) * 20 * self.combo
             self.score += score_gain
@@ -516,7 +527,7 @@ class Match3Pro:
                 self._render_frames(35)
 
             self.do_fall_and_refill()
-            last_swap_pos = None
+            swap_candidates = None  # 只有第一波消除才尝试生成道具
 
         # 结算判断：
         # - 三星达到 (>= target*2) 且还有剩余步数 → 步数奖励

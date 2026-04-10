@@ -12034,16 +12034,2603 @@
 #     except: pass
 #     App()
 
+# """
+# 摸鱼阅读器 v8.0  —  全功能版
+# 功能：
+#   阅读体验：章节滚动、翻页、字号/行距/字色/背景/护眼模式、透明度、屏幕取色
+#   书架管理：添加/删除/重命名书籍、显示封面/进度/上次阅读时间
+#   阅读进度：自动记录、书架显示进度条
+#   笔记系统：N键在当前章节创建笔记、查看/编辑/删除笔记
+#   书签系统：O键快速书签、书签列表跳转删除
+#   听书TTS ：F5启动/停止，支持语速调整（需系统 pyttsx3 或 espeak）
+#   竖向拖拽滚动条、目录跳转、搜索
+
+# 运行：python novel_reader.py
+# 依赖：pip install pyttsx3   （TTS，可选）
+#       pip install pillow     （屏幕取色，可选）
+# """
+
+# import tkinter as tk
+# from tkinter import ttk, filedialog, colorchooser, messagebox, scrolledtext
+# import os, re, zipfile, sys, json, copy, threading, time, datetime
+# from html.parser import HTMLParser
+
+
+# # ══════════════════════════════════════════════════════════════
+# # HTML → 纯文本
+# # ══════════════════════════════════════════════════════════════
+# class _H2T(HTMLParser):
+#     SKIP  = {'script','style','head','meta','link'}
+#     BLOCK = {'p','div','br','h1','h2','h3','h4','h5',
+#              'h6','li','tr','td','th','section','article'}
+#     def __init__(self): super().__init__(); self.out, self._s = [], 0
+#     def handle_starttag(self, tag, _):
+#         if tag in self.SKIP:  self._s += 1
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_endtag(self, tag):
+#         if tag in self.SKIP:  self._s = max(0, self._s-1)
+#         if tag in self.BLOCK: self.out.append('\n')
+#     def handle_data(self, d):
+#         if not self._s: self.out.append(d)
+#     def text(self): return re.sub(r'\n{3,}','\n\n',''.join(self.out)).strip()
+
+# def html2text(s):
+#     p = _H2T()
+#     try: p.feed(s)
+#     except: pass
+#     return p.text()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # EPUB
+# # ══════════════════════════════════════════════════════════════
+# def read_epub(path):
+#     import xml.etree.ElementTree as ET
+#     title = os.path.splitext(os.path.basename(path))[0]
+#     body  = ''
+#     try:
+#         with zipfile.ZipFile(path) as z:
+#             ns = z.namelist()
+#             opf, odir = '', ''
+#             if 'META-INF/container.xml' in ns:
+#                 for el in ET.fromstring(z.read('META-INF/container.xml')).iter():
+#                     if el.tag.endswith('rootfile'):
+#                         opf = el.get('full-path',''); odir = opf.rsplit('/',1)[0] if '/' in opf else ''; break
+#             items, spine = {}, []
+#             if opf and opf in ns:
+#                 root = ET.fromstring(z.read(opf))
+#                 for el in root.iter():
+#                     tag = el.tag.split('}')[-1]
+#                     if tag == 'item':
+#                         mid,href,mt = el.get('id',''),el.get('href',''),el.get('media-type','')
+#                         if href and ('html' in mt or href.endswith(('.html','.xhtml','.htm'))):
+#                             items[mid] = (odir+'/'+href).lstrip('/') if odir else href
+#                     elif tag == 'itemref':
+#                         r = el.get('idref','')
+#                         if r in items: spine.append(items[r])
+#                     elif tag == 'title' and el.text: title = el.text
+#             if not spine:
+#                 spine = sorted(f for f in ns if re.search(r'\.(html|htm|xhtml)$',f,re.I)
+#                                and 'toc' not in f.lower() and 'nav' not in f.lower())
+#             for href in spine:
+#                 if href in ns:
+#                     try: body += html2text(z.read(href).decode('utf-8','replace')) + '\n\n'
+#                     except: pass
+#     except Exception as e: body = f'[EPUB解析失败: {e}]'
+#     return title, body.strip()
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 章节切割
+# # ══════════════════════════════════════════════════════════════
+# _CH = re.compile(
+#     r'^(第\s*[零一二三四五六七八九十百千万\d〇]+\s*[章节卷集回部篇][^\n]{0,40}'
+#     r'|Chapter\s*\d+[^\n]{0,40}|CHAPTER\s*\d+[^\n]{0,40}|【[^\n]{1,30}】)', re.I)
+
+# def split_chapters(text):
+#     bounds = []
+#     for m in re.finditer(r'^.+$', text, re.M):
+#         line = m.group().strip()
+#         if line and _CH.match(line): bounds.append((m.start(), line))
+#     if not bounds: return [{'title':'全文','body':text}]
+#     chs = []
+#     for i,(pos,title) in enumerate(bounds):
+#         end = bounds[i+1][0] if i+1<len(bounds) else len(text)
+#         chs.append({'title':title,'body':text[pos:end]})
+#     return chs
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 数据存储
+# # ══════════════════════════════════════════════════════════════
+# DATA_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.moyu_data')
+# os.makedirs(DATA_DIR, exist_ok=True)
+# SHELF_FILE = os.path.join(DATA_DIR, 'shelf.json')
+# NOTES_FILE = os.path.join(DATA_DIR, 'notes.json')
+# MARKS_FILE = os.path.join(DATA_DIR, 'marks.json')
+# BOSS_FILE  = os.path.join(DATA_DIR, 'boss_text.txt')  # <== 新增这一行：伪装文档的保存路径
+# # 数据存储 (在原有基础上增加)
+# PROFILES_DIR = os.path.join(DATA_DIR, 'profiles')
+# os.makedirs(PROFILES_DIR, exist_ok=True)
+# def _jload(f):
+#     try:
+#         with open(f, encoding='utf-8') as fp: return json.load(fp)
+#     except: return {}
+
+# def _jsave(f, d):
+#     try:
+#         with open(f, 'w', encoding='utf-8') as fp: json.dump(d, fp, ensure_ascii=False, indent=2)
+#     except: pass
+
+# _DEFAULT_BOSS_TEXT = """\
+# ■ 项目可行性研究报告
+ 
+# 编制单位：战略发展部  |  编制日期：2025年4月
+ 
+# ▸ 一、项目背景与目标
+ 
+# 随着市场竞争日趋激烈，公司决策层在2025年第一季度战略会议上提出，需针对核心业务板块开展系统性的可行性研究，以明确下一阶段的资源配置方向与投资优先级。本报告旨在通过定量与定性相结合的方法，对拟实施项目的技术可行性、经济合理性及实施风险进行全面评估。
+ 
+# 经前期市场调研数据显示，目标细分市场年均增速达17.3%，远超行业平均水平，具备较好的市场基础与发展潜力，具体分析详见第三章。
+ 
+# ▸ 二、市场分析
+ 
+# 当前宏观政策环境整体利好，相关产业政策的持续推进为项目落地提供了良好的外部条件。通过对近三年行业数据的纵向比较，市场需求端呈现出明显的结构性转变，高附加值产品占比逐步提升。
+ 
+# 竞争格局分析表明，现有主要竞争者在技术壁垒与成本控制方面均存在明显短板，本项目具备差异化切入的战略窗口期。
+ 
+# ▸ 三、财务预测
+ 
+# 根据保守情景模型，项目预计于第18个月实现盈亏平衡，IRR达23.6%，NPV（折现率10%）为正值，投资回收期约2.4年。详细财务模型及敏感性分析参见附件二。
+ 
+# ▸ 四、风险评估与应对
+ 
+# 主要风险包括市场需求不及预期、核心技术迭代加速及供应链稳定性等。建议建立动态监控机制，每季度对关键假设进行复盘修正，确保项目执行的灵活性与韧性。
+ 
+# ▸ 五、结论与建议
+ 
+# 综合以上分析，本项目在经济性、技术可行性及战略契合度方面均达到立项标准，建议提交董事会审议，并在本季度内完成项目筹备委员会组建工作。
+# """   
+
+# def _inject_api_key():
+#     """
+#     从程序目录的 api_key.txt 自动读取智谱 API Key。
+#     用户把 Key 粘贴进 api_key.txt 即可，无需手动配置环境变量。
+#     返回 key 字符串，失败返回空字符串。
+#     """
+#     key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_key.txt')
+#     if os.path.exists(key_file):
+#         try:
+#             key = open(key_file, encoding='utf-8').read().strip()
+#             if key:
+#                 os.environ['ZHIPU_API_KEY'] = key
+#                 return key
+#         except: pass
+#     return os.environ.get('ZHIPU_API_KEY', '')
+
+# def _get_api_key(model_type):
+#     """
+#     根据选择的模型类型读取对应的 API Key
+#     GLM 使用 api_key.txt
+#     MiniMax 使用 api_key_minimax.txt
+#     """
+#     filename = 'api_key_minimax.txt' if model_type == 'MiniMax' else 'api_key.txt'
+#     env_var = 'MINIMAX_API_KEY' if model_type == 'MiniMax' else 'ZHIPU_API_KEY'
+#     key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    
+#     if os.path.exists(key_file):
+#         try:
+#             key = open(key_file, encoding='utf-8').read().strip()
+#             if key: return key
+#         except: pass
+#     return os.environ.get(env_var, '')
+# # ══════════════════════════════════════════════════════════════
+# # 健壮的 API 调用 (支持指数退避重试)
+# # ══════════════════════════════════════════════════════════════
+# def _robust_api_call(model_type, messages, max_retries=3, timeout=40):
+#     import time
+#     import urllib.request as _ureq
+#     import urllib.error as _uerr
+#     import json as _ujson
+    
+#     key = _get_api_key(model_type)
+#     if not key: return False, "NO_KEY"
+    
+#     url = 'https://api.minimax.chat/v1/chat/completions' if model_type == 'MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+#     model_name = 'abab6.5s-chat' if model_type == 'MiniMax' else 'glm-4-flash'
+    
+#     payload = _ujson.dumps({
+#         "model": model_name,
+#         "messages": messages,
+#         "temperature": 0.6
+#     }).encode('utf-8')
+    
+#     req = _ureq.Request(url, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}, method='POST')
+    
+#     for attempt in range(max_retries):
+#         try:
+#             with _ureq.urlopen(req, timeout=timeout) as resp:
+#                 data = _ujson.loads(resp.read().decode('utf-8'))
+#                 return True, data['choices'][0]['message']['content']
+#         except _uerr.HTTPError as e:
+#             if e.code == 429: # 触发速率限制 (Too Many Requests)
+#                 wait_time = (attempt + 1) * 3 # 阶梯延迟: 3s, 6s, 9s
+#                 time.sleep(wait_time)
+#                 continue
+#             else:
+#                 err_msg = e.read().decode('utf-8', errors='replace')
+#                 return False, f"HTTP {e.code}: {err_msg[:100]}"
+#         except Exception as e:
+#             # 捕获网络抖动或超时
+#             time.sleep(2)
+#             if attempt == max_retries - 1:
+#                 return False, f"网络错误: {str(e)}"
+#             continue
+            
+#     return False, "请求太频繁或网络持续拥堵，已超过最大重试次数"
+
+# # ══════════════════════════════════════════════════════════════
+# # TTS 引擎（可选）
+# # ══════════════════════════════════════════════════════════════
+# class TTS:
+#     def __init__(self):
+#         self._engine = None
+#         self._thread = None
+#         self._stop   = threading.Event()
+#         self._text   = ''
+#         self._rate   = 180
+#         self._avail  = False
+#         # self._tts_playing   = False
+#         # self._is_boss_mode  = False  # 新增：老板键状态
+#         self._init()
+
+#     def _init(self):
+#         try:
+#             import pyttsx3
+#             self._engine = pyttsx3.init()
+#             self._avail  = True
+#         except:
+#             self._avail = False
+
+#     @property
+#     def available(self): return self._avail
+
+#     def set_rate(self, rate):
+#         self._rate = int(rate)
+#         if self._engine:
+#             try: self._engine.setProperty('rate', self._rate)
+#             except: pass
+
+#     def speak(self, text, on_done=None):
+#         if not self._avail: return
+#         self.stop()
+#         self._stop.clear()
+#         self._text = text
+
+#         def run():
+#             try:
+#                 import pyttsx3
+#                 eng = pyttsx3.init()
+#                 eng.setProperty('rate', self._rate)
+#                 # 逐段朗读，支持中途停止
+#                 paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+#                 for para in paragraphs:
+#                     if self._stop.is_set(): break
+#                     eng.say(para)
+#                     eng.runAndWait()
+#                 eng.stop()
+#             except: pass
+#             if on_done: on_done()
+
+#         self._thread = threading.Thread(target=run, daemon=True)
+#         self._thread.start()
+
+#     def stop(self):
+#         self._stop.set()
+#         if self._engine:
+#             try: self._engine.stop()
+#             except: pass
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 屏幕取色器
+# # ══════════════════════════════════════════════════════════════
+# def screen_color_picker(callback):
+#     try: from PIL import ImageGrab
+#     except ImportError:
+#         c = colorchooser.askcolor(title='选择颜色')
+#         if c and c[1]: callback(c[1])
+#         return
+#     from PIL import ImageGrab, Image, ImageTk
+#     ZOOM,HALF = 10,5; CS = (HALF*2+1)*ZOOM
+#     preview = tk.Toplevel(); preview.overrideredirect(True)
+#     preview.attributes('-topmost',True); preview.configure(bg='#1a1a1a')
+#     preview.geometry(f'{CS+4}x{CS+28}+200+200')
+#     canvas = tk.Canvas(preview,width=CS,height=CS,bg='#000',highlightthickness=1,
+#                        highlightbackground='#555',cursor='none')
+#     canvas.pack(padx=2,pady=(2,0))
+#     lbl = tk.Label(preview,text='#000000',font=('Consolas',9,'bold'),bg='#1a1a1a',fg='white',pady=1)
+#     lbl.pack()
+#     cur,ph,aid,done = ['#000000'],[None],[None],[False]
+#     def update():
+#         if done[0]: return
+#         try:
+#             mx,my = preview.winfo_pointerx(),preview.winfo_pointery()
+#             img = ImageGrab.grab(bbox=(mx-HALF,my-HALF,mx+HALF+1,my+HALF+1))
+#             zoomed = img.resize((CS,CS),Image.NEAREST); ph[0]=ImageTk.PhotoImage(zoomed)
+#             canvas.delete('all'); canvas.create_image(0,0,anchor='nw',image=ph[0])
+#             c2=CS//2
+#             canvas.create_line(c2,0,c2,CS,fill='white',width=1)
+#             canvas.create_line(0,c2,CS,c2,fill='white',width=1)
+#             canvas.create_rectangle(c2-ZOOM,c2-ZOOM,c2+ZOOM,c2+ZOOM,outline='white',width=2)
+#             px=img.getpixel((HALF,HALF)); hx='#{:02x}{:02x}{:02x}'.format(px[0],px[1],px[2])
+#             cur[0]=hx; lbl.config(text=hx)
+#             sw,sh=preview.winfo_screenwidth(),preview.winfo_screenheight()
+#             ox,oy=mx+18,my+18
+#             if ox+CS+10>sw: ox=mx-CS-22
+#             if oy+CS+32>sh: oy=my-CS-34
+#             preview.geometry(f'+{ox}+{oy}')
+#         except: pass
+#         aid[0]=preview.after(40,update)
+#     def finish():
+#         done[0]=True
+#         if aid[0]:
+#             try: preview.after_cancel(aid[0])
+#             except: pass
+#         for w in (overlay,preview):
+#             try: w.destroy()
+#             except: pass
+#     overlay = tk.Toplevel(); overlay.overrideredirect(True)
+#     overlay.attributes('-topmost',True); overlay.attributes('-alpha',0.01)
+#     sw,sh=overlay.winfo_screenwidth(),overlay.winfo_screenheight()
+#     overlay.geometry(f'{sw}x{sh}+0+0'); overlay.configure(bg='white',cursor='crosshair')
+#     overlay.bind('<Button-1>',lambda e:(finish(),callback(cur[0])))
+#     overlay.bind('<Escape>',lambda e:finish())
+#     overlay.focus_force(); aid[0]=preview.after(40,update)
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 自定义竖向滚动条
+# # ══════════════════════════════════════════════════════════════
+# class SmoothScrollbar:
+#     W = 10
+#     def __init__(self, parent, on_scroll):
+#         self.on_scroll = on_scroll
+#         self._lo,self._hi = 0.0,1.0
+#         self._dragging = False; self._drag_start_y = 0; self._drag_start_lo = 0.0
+#         self.c_bg='#ebdbb2'; self.c_track='#d5c4a1'; self.c_thumb='#b8a882'; self.c_hover='#8f7a55'
+#         self.cv = tk.Canvas(parent, width=self.W, highlightthickness=0, cursor='arrow')
+#         self.cv.pack(side='right', fill='y')
+#         self.cv.bind('<Configure>', lambda e: self._draw())
+#         self.cv.bind('<ButtonPress-1>',   self._press)
+#         self.cv.bind('<B1-Motion>',       self._drag)
+#         self.cv.bind('<ButtonRelease-1>', self._release)
+#         self.cv.bind('<Enter>', lambda e: self._hover(True))
+#         self.cv.bind('<Leave>', lambda e: self._hover(False))
+#         self._hovered = False
+
+#     def set(self, lo, hi): self._lo,self._hi = float(lo),float(hi); self._draw()
+
+#     def set_colors(self, bg, track, thumb, thumb_hover):
+#         self.c_bg=bg; self.c_track=track; self.c_thumb=thumb; self.c_hover=thumb_hover; self._draw()
+
+#     def _draw(self):
+#         cv=self.cv; W=self.W; H=cv.winfo_height()
+#         if H<4: return
+#         cv.delete('all'); PAD=2
+#         cv.create_rectangle(0,0,W,H,fill=self.c_bg,outline='')
+#         tx=W//2
+#         cv.create_line(tx,PAD,tx,H-PAD,fill=self.c_track,width=W-4,capstyle='round')
+#         th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+#         ty2=min(H-PAD,ty+th); color=self.c_hover if self._hovered else self.c_thumb
+#         r=(W-4)//2; x1,x2=2,W-2; y1,y2=ty,ty2
+#         if y2-y1>=2*r:
+#             cv.create_rectangle(x1,y1+r,x2,y2-r,fill=color,outline='')
+#             cv.create_oval(x1,y1,x2,y1+2*r,fill=color,outline='')
+#             cv.create_oval(x1,y2-2*r,x2,y2,fill=color,outline='')
+#         else: cv.create_oval(x1,y1,x2,y2,fill=color,outline='')
+
+#     def _hover(self, v): self._hovered=v; self._draw()
+
+#     def _y_to_frac(self,y):
+#         H=self.cv.winfo_height(); PAD=2
+#         return max(0.0,min(1.0,(y-PAD)/max(1,H-2*PAD)))
+
+#     def _thumb_range(self):
+#         H=self.cv.winfo_height(); PAD=2
+#         th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+#         return ty,ty+th
+
+#     def _press(self, e):
+#         ty1,ty2=self._thumb_range()
+#         if ty1<=e.y<=ty2:
+#             self._dragging=True; self._drag_start_y=e.y; self._drag_start_lo=self._lo
+#         else:
+#             frac=self._y_to_frac(e.y); span=self._hi-self._lo
+#             self.on_scroll(max(0.0,min(1.0-span,frac-span/2)))
+
+#     def _drag(self, e):
+#         if not self._dragging: return
+#         H=self.cv.winfo_height(); PAD=2; dy=e.y-self._drag_start_y
+#         delta=dy/max(1,H-2*PAD); span=self._hi-self._lo
+#         target=max(0.0,min(1.0-span,self._drag_start_lo+delta))
+#         self._lo=target; self._hi=target+span; self._draw(); self.on_scroll(target)
+
+#     def _release(self, e): self._dragging=False
+
+
+# # ══════════════════════════════════════════════════════════════
+# # 主程序
+# # ══════════════════════════════════════════════════════════════
+# class App:
+
+#     THEMES = {
+#         '暖黄': dict(bg='#fdf6e3',fg='#3c3836',bar='#ebdbb2',sel='#d5c4a1',thumb='#b8a882',thumb_h='#8f7a55'),
+#         '夜间': dict(bg='#1e1e2e',fg='#cdd6f4',bar='#181825',sel='#313244',thumb='#45475a',thumb_h='#6c7086'),
+#         '护眼': dict(bg='#1a2f1a',fg='#a8d5a2',bar='#152315',sel='#2d5a2d',thumb='#3a6b3a',thumb_h='#57c454'),
+#         '纸张': dict(bg='#f5f0e8',fg='#2c2416',bar='#ede4d0',sel='#c8b89a',thumb='#c8a882',thumb_h='#8b6045'),
+#         '白底': dict(bg='#ffffff',fg='#1a1a1a',bar='#f0f0f0',sel='#dddddd',thumb='#bbbbbb',thumb_h='#888888'),
+#     }
+
+#     def __init__(self):
+#         self.root = tk.Tk()
+#         self.root.title('摸鱼阅读器')
+#         self.root.geometry('440x630')
+#         self.root.minsize(320, 400)
+#         self.root.attributes('-topmost', True)
+
+#         # 数据
+#         self.shelf   = _jload(SHELF_FILE)   # {path: {title,last_ch,total_ch,last_time,read_time}}
+#         self.notes   = _jload(NOTES_FILE)   # {path: [{ch,title,content,time}]}
+#         self.marks   = _jload(MARKS_FILE)   # {path: [{ch,ch_title,time}]}
+
+#         self.book_path  = ''
+#         self.book_title = ''
+#         self.chapters   = []
+#         self.cur_ch     = 0
+
+#         # UI 状态
+#         self.theme_name     = '暖黄'
+#         self.custom_bg      = None
+#         self.custom_bar     = None
+#         self.font_size      = 14
+#         self.line_spacing   = 6
+#         self.font_fam       = ('宋体' if sys.platform=='win32'
+#                                else 'Songti SC' if sys.platform=='darwin'
+#                                else 'Noto Serif CJK SC')
+#         self._d_held        = False
+#         self._minimized     = False
+#         self._settings_open = False
+#         self._wheel_accum   = 0
+#         self._tts_playing   = False
+#         self._is_boss_mode  = False  # <======== 就是漏了这一行！一定要加在这里！
+#         self.tts = TTS()
+
+#         self._build_ui()
+#         self._apply_theme()
+#         self._bind_keys()
+#         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+#         self.root.mainloop()
+
+#     # ─────────────────────────────────────────────────
+#     # UI 构建
+#     # ─────────────────────────────────────────────────
+#     def _build_ui(self):
+#         r = self.root
+
+#         # 顶部栏
+#         self.topbar = tk.Frame(r, height=30)
+#         self.topbar.pack(fill='x')
+#         self.topbar.pack_propagate(False)
+
+#         dots = tk.Frame(self.topbar)
+#         dots.pack(side='left', padx=6, pady=5)
+#         self._dot(dots, '#ff5f57', self.toggle_minimize)
+#         self._dot(dots, '#ffbd2e', self.toggle_settings)
+#         self._dot(dots, '#28ca41', self.open_file)
+
+#         self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('',9))
+#         self.lbl_title.pack(side='left', fill='x', expand=True)
+
+#         rbf = tk.Frame(self.topbar); rbf.pack(side='right', padx=2)
+#         self._tbtn(rbf, '书架', self.open_shelf)
+#         self._tbtn(rbf, '目录', self.open_chapters)
+#         self._tbtn(rbf, '搜索', self.open_search)
+#         self._tbtn(rbf, '摘要', self.open_summary)
+#         self._tbtn(rbf, '找章', self.open_chapter_finder)
+#         self._tbtn(rbf, '笔记', self.open_notes)
+#         self._tbtn(rbf, '书签', self.open_marks)
+#         self._tbtn(rbf, '打开', self.open_file)
+#         self._tbtn(rbf, '对话', self.open_role_chat)
+#         self._tbtn(rbf, '×',   r.destroy)
+
+#         for w in (self.topbar, self.lbl_title):
+#             w.bind('<ButtonPress-1>', self._drag_start)
+#             w.bind('<B1-Motion>',     self._drag_move)
+
+#         # 设置栏
+#         self.setbar = tk.Frame(r)
+#         self._build_setbar()
+
+#         # 分隔线
+#         self.sep = tk.Frame(r, height=1)
+#         self.sep.pack(fill='x')
+
+#         # 文本区
+#         self.txt_frame = tk.Frame(r)
+#         self.txt_frame.pack(fill='both', expand=True)
+
+#         self.vsb = SmoothScrollbar(self.txt_frame,
+#                                    on_scroll=lambda f: self.txt.yview_moveto(f))
+
+#         self.txt = tk.Text(
+#             self.txt_frame, wrap='word',
+#             relief='flat', padx=16, pady=10,
+#             state='disabled', cursor='arrow',
+#             font=(self.font_fam, self.font_size),
+#             borderwidth=0, highlightthickness=0,
+#             spacing1=self.line_spacing,
+#             spacing2=self.line_spacing//2,
+#             spacing3=self.line_spacing,
+#             yscrollcommand=self._on_yscroll,
+#         )
+#         self.txt.pack(side='left', fill='both', expand=True)
+#         self.txt.bind('<Button-1>',   self._on_click)
+#         self.txt.bind('<MouseWheel>', self._on_wheel)
+#         self.txt.bind('<Button-4>',   self._on_wheel)
+#         self.txt.bind('<Button-5>',   self._on_wheel)
+#         self._show_welcome()
+
+#         # 底部
+#         self.bot_area = tk.Frame(r)
+#         self.bot_area.pack(fill='x', side='bottom')
+
+#         self.botbar = tk.Frame(self.bot_area, height=28)
+#         self.botbar.pack(fill='x')
+#         self.botbar.pack_propagate(False)
+
+#         self.btn_prev = tk.Button(self.botbar, text='◀', font=('',9),
+#                                   relief='flat', padx=4, command=self.prev_chapter)
+#         self.btn_prev.pack(side='left', padx=4, pady=3)
+
+#         self.lbl_prog = tk.Label(self.botbar, text='', font=('',8))
+#         self.lbl_prog.pack(side='left', expand=True)
+
+#         self.btn_tts = tk.Button(self.botbar, text='🔊', font=('',9),
+#                                  relief='flat', padx=3, command=self.toggle_tts)
+#         self.btn_tts.pack(side='right', padx=2, pady=3)
+
+#         self.btn_note = tk.Button(self.botbar, text='✏', font=('',9),
+#                                   relief='flat', padx=3, command=self.add_note)
+#         self.btn_note.pack(side='right', padx=2, pady=3)
+
+#         self.btn_mark = tk.Button(self.botbar, text='🔖', font=('',9),
+#                                   relief='flat', padx=2, command=self.add_mark)
+#         self.btn_mark.pack(side='right', padx=2, pady=3)
+
+#         self.btn_next = tk.Button(self.botbar, text='▶', font=('',9),
+#                                   relief='flat', padx=4, command=self.next_chapter)
+#         self.btn_next.pack(side='right', padx=4, pady=3)
+
+#     def _tbtn(self, parent, text, cmd):
+#         tk.Button(parent, text=text, font=('',8), relief='flat',
+#                   padx=3, command=cmd).pack(side='left', padx=1)
+
+#     def _dot(self, p, color, cmd):
+#         lb = tk.Label(p, text='⬤', fg=color, font=('',12), cursor='hand2')
+#         lb.pack(side='left', padx=2)
+#         lb.bind('<Button-1>', lambda e: cmd())
+
+#     # ─────────────────────────────────────────────────
+#     # 设置栏
+#     # ─────────────────────────────────────────────────
+#     def _build_setbar(self):
+#         def row(): f=tk.Frame(self.setbar); f.pack(fill='x',padx=8,pady=2); return f
+
+#         r1 = row()
+#         tk.Label(r1,text='字号',font=('',8)).pack(side='left')
+#         self.sl_font = tk.Scale(r1,from_=10,to=32,orient='horizontal',length=70,
+#                                 showvalue=True,font=('',7),command=self._on_font_size)
+#         self.sl_font.set(self.font_size); self.sl_font.pack(side='left',padx=2)
+#         tk.Label(r1,text='行距',font=('',8)).pack(side='left',padx=(8,0))
+#         self.sl_spacing = tk.Scale(r1,from_=0,to=24,orient='horizontal',length=70,
+#                                    showvalue=True,font=('',7),command=self._on_spacing)
+#         self.sl_spacing.set(self.line_spacing); self.sl_spacing.pack(side='left',padx=2)
+
+#         r2 = row()
+#         tk.Label(r2,text='透明',font=('',8)).pack(side='left')
+#         self.sl_alpha = tk.Scale(r2,from_=20,to=100,orient='horizontal',length=80,
+#                                  showvalue=True,font=('',7),
+#                                  command=lambda v: self.root.attributes('-alpha',int(v)/100))
+#         self.sl_alpha.set(100); self.sl_alpha.pack(side='left',padx=2)
+#         # TTS 语速
+#         tk.Label(r2,text='语速',font=('',8)).pack(side='left',padx=(8,0))
+#         self.sl_tts_rate = tk.Scale(r2,from_=80,to=300,orient='horizontal',length=70,
+#                                     showvalue=True,font=('',7),
+#                                     command=lambda v: self.tts.set_rate(int(v)))
+#         self.sl_tts_rate.set(180); self.sl_tts_rate.pack(side='left',padx=2)
+
+#         r3 = row()
+#         tk.Label(r3,text='字色',font=('',8)).pack(side='left')
+#         self.btn_fg_color = tk.Button(r3,text='  ',relief='groove',width=2,
+#                                       font=('',8),command=self._pick_fg)
+#         self.btn_fg_color.pack(side='left',padx=2)
+#         tk.Label(r3,text='背景',font=('',8)).pack(side='left',padx=(6,0))
+#         self.btn_bg_color = tk.Button(r3,text='  ',relief='groove',width=2,
+#                                       font=('',8),command=self._pick_bg)
+#         self.btn_bg_color.pack(side='left',padx=2)
+#         tk.Button(r3,text='🎨取色',font=('',8),relief='flat',padx=4,
+#                   command=self._screen_pick).pack(side='left',padx=4)
+#         tk.Button(r3,text='重置',font=('',8),relief='flat',padx=4,
+#                   command=self._reset_colors).pack(side='left',padx=2)
+
+#         r4 = row()
+#         tk.Label(r4,text='主题',font=('',8)).pack(side='left')
+#         self.var_theme = tk.StringVar(value=self.theme_name)
+#         cb = ttk.Combobox(r4,textvariable=self.var_theme,
+#                           values=list(self.THEMES.keys()),width=7,font=('',8),state='readonly')
+#         cb.pack(side='left',padx=4); cb.bind('<<ComboboxSelected>>',self._on_theme)
+#         # 快速护眼切换
+#         tk.Button(r4,text='☘护眼',font=('',8),relief='flat',padx=4,
+#                   command=lambda: (self.var_theme.set('护眼'),self._on_theme())).pack(side='left',padx=2)
+#         tk.Button(r4,text='🌙夜间',font=('',8),relief='flat',padx=4,
+#                   command=lambda: (self.var_theme.set('夜间'),self._on_theme())).pack(side='left',padx=2)
+#         # <== 新增：伪装编辑器按钮
+#         tk.Button(r4,text='📝伪装内容',font=('',8),relief='flat',padx=4, fg='#2b579a',
+#                   command=self.open_boss_editor).pack(side='left',padx=6)
+
+#         # ── 新增：AI模型切换 ─────────────────────────
+#         r5 = row()
+#         tk.Label(r5, text='AI模型', font=('',8)).pack(side='left')
+#         self.var_ai_model = tk.StringVar(value='GLM (智谱)')
+#         cb_ai = ttk.Combobox(r5, textvariable=self.var_ai_model,
+#                              values=['GLM (智谱)', 'MiniMax'], width=12, font=('',8), state='readonly')
+#         cb_ai.pack(side='left', padx=4)
+
+#     # ─────────────────────────────────────────────────
+#     # 颜色
+#     # ─────────────────────────────────────────────────
+#     def _pick_fg(self):
+#         t=self._cur_theme(); c=colorchooser.askcolor(color=t['fg'],title='字体颜色')
+#         if c and c[1]: self.THEMES[self.theme_name]['fg']=c[1]; self.txt.config(fg=c[1]); self.btn_fg_color.config(bg=c[1])
+
+#     def _pick_bg(self):
+#         c=colorchooser.askcolor(color=self._cur_theme()['bg'],title='背景颜色')
+#         if c and c[1]: self._apply_custom_bg(c[1])
+
+#     def _screen_pick(self):
+#         alpha=self.sl_alpha.get()/100; self.root.attributes('-alpha',0.0)
+#         def on(hx): self.root.after(100,lambda:self.root.attributes('-alpha',alpha)); self._apply_custom_bg(hx)
+#         self.root.after(120, lambda: screen_color_picker(on))
+
+#     def _apply_custom_bg(self,hx):
+#         self.custom_bg=hx; self.custom_bar=self._darken(hx,0.88); self._apply_theme()
+#         try: self.btn_bg_color.config(bg=hx)
+#         except: pass
+
+#     def _reset_colors(self): self.custom_bg=self.custom_bar=None; self._apply_theme()
+#     def _darken(self,hx,f=0.88):
+#         h=hx.lstrip('#')
+#         return '#{:02x}{:02x}{:02x}'.format(int(int(h[0:2],16)*f),int(int(h[2:4],16)*f),int(int(h[4:6],16)*f))
+
+#     def _cur_theme(self):
+#         t=copy.copy(self.THEMES[self.theme_name])
+#         if self.custom_bg:  t['bg']=self.custom_bg
+#         if self.custom_bar: t['bar']=self.custom_bar
+#         return t
+
+#     def _on_theme(self, e=None):
+#         self.theme_name=self.var_theme.get(); self.custom_bg=self.custom_bar=None; self._apply_theme()
+
+#     def _apply_theme(self):
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         self.root.configure(bg=bar)
+#         self._cf(self.topbar,bar,fg); self._cf(self.botbar,bar,fg); self._cf(self.bot_area,bar,fg)
+#         self.sep.config(bg=sel); self.txt_frame.config(bg=bg)
+#         self.vsb.cv.config(bg=bg)
+#         self.vsb.set_colors(bg=bg,track=sel,thumb=t.get('thumb',sel),thumb_hover=t.get('thumb_h',fg))
+#         self.txt.config(bg=bg,fg=fg,insertbackground=fg,selectbackground=sel)
+#         self.lbl_prog.config(bg=bar,fg=fg)
+#         for b in (self.btn_prev,self.btn_next,self.btn_mark,self.btn_note,self.btn_tts):
+#             b.config(bg=bar,fg=fg,activebackground=sel)
+#         self._retheme_setbar()
+#         try:
+#             if self.custom_bg: self.btn_bg_color.config(bg=self.custom_bg)
+#         except: pass
+
+#     def _cf(self,fr,bg,fg):
+#         try: fr.config(bg=bg)
+#         except: pass
+#         for w in fr.winfo_children():
+#             try: w.config(bg=bg,fg=fg,activebackground=bg)
+#             except: pass
+#             for w2 in w.winfo_children():
+#                 try: w2.config(bg=bg,fg=fg,activebackground=bg)
+#                 except: pass
+
+#     def _retheme_setbar(self):
+#         t=self._cur_theme(); bg,fg,sel=t['bar'],t['fg'],t['sel']
+#         self._cf(self.setbar,bg,fg)
+#         for sl in (self.sl_font,self.sl_alpha,self.sl_spacing,self.sl_tts_rate):
+#             try: sl.config(bg=bg,fg=fg,troughcolor=sel,activebackground=sel)
+#             except: pass
+#         try: self.btn_fg_color.config(bg=fg)
+#         except: pass
+
+#     # ─────────────────────────────────────────────────
+#     # 字号 / 行距
+#     # ─────────────────────────────────────────────────
+#     def _on_font_size(self,val):
+#         self.font_size=int(float(val)); self.txt.config(font=(self.font_fam,self.font_size))
+
+#     def _on_spacing(self,val):
+#         sp=int(float(val)); self.line_spacing=sp
+#         self.txt.config(spacing1=sp,spacing2=sp//2,spacing3=sp)
+
+#     # ─────────────────────────────────────────────────
+#     # 拖动窗口
+#     # ─────────────────────────────────────────────────
+#     def _drag_start(self,e): self._dx=e.x_root-self.root.winfo_x(); self._dy=e.y_root-self.root.winfo_y()
+#     def _drag_move(self,e):  self.root.geometry(f'+{e.x_root-self._dx}+{e.y_root-self._dy}')
+
+#     # ─────────────────────────────────────────────────
+#     # 打开文件
+#     # ─────────────────────────────────────────────────
+#     def open_file(self, path=None):
+#         if path is None:
+#             path = filedialog.askopenfilename(
+#                 title='打开小说',
+#                 filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')])
+#         if not path: return
+#         ext = os.path.splitext(path)[1].lower()
+#         if ext == '.epub': title,text = read_epub(path)
+#         else:
+#             title = os.path.splitext(os.path.basename(path))[0]
+#             try:
+#                 with open(path,encoding='utf-8',errors='replace') as f: text=f.read()
+#             except Exception as e: messagebox.showerror('错误',str(e)); return
+#         self.book_path=path; self.book_title=title
+#         self.lbl_title.config(text=f'  {title}'); self.root.title(f'摸鱼阅读器 — {title}')
+#         self._load(text)
+
+#     def _load(self,text):
+#         self.chapters = split_chapters(text)
+#         # 恢复上次阅读位置
+#         si = self.shelf.get(self.book_path,{})
+#         self.cur_ch = max(0,min(si.get('last_ch',0),len(self.chapters)-1))
+#         # 更新书架
+#         self._shelf_update()
+#         self._render_chapter()
+
+#     # ─────────────────────────────────────────────────
+#     # 书架管理
+#     # ─────────────────────────────────────────────────
+#     def _shelf_update(self):
+#         p = self.book_path
+#         prev = self.shelf.get(p,{})
+#         self.shelf[p] = {
+#             'title':      self.book_title,
+#             'path':       p,
+#             'last_ch':    self.cur_ch,
+#             'total_ch':   len(self.chapters),
+#             'last_time':  datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+#             'added_time': prev.get('added_time', datetime.datetime.now().strftime('%Y-%m-%d')),
+#         }
+#         _jsave(SHELF_FILE, self.shelf)
+
+#     def open_shelf(self):
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         win=tk.Toplevel(self.root); win.title('书架'); win.geometry('380x460')
+#         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+
+#         hdr=tk.Frame(win,bg=bar,height=30); hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr,text='📚 书架',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=10,pady=5)
+#         tk.Button(hdr,text='+添加',font=('',8),relief='flat',bg=bar,fg=fg,
+#                   command=lambda:self._shelf_add(win)).pack(side='right',padx=4)
+#         tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,
+#                   command=win.destroy).pack(side='right',padx=4)
+
+#         # 书籍列表
+#         frame=tk.Frame(win,bg=bg); frame.pack(fill='both',expand=True,padx=6,pady=6)
+#         sb2=tk.Scrollbar(frame); sb2.pack(side='right',fill='y')
+#         canvas=tk.Canvas(frame,bg=bg,highlightthickness=0,yscrollcommand=sb2.set)
+#         canvas.pack(fill='both',expand=True); sb2.config(command=canvas.yview)
+#         inner=tk.Frame(canvas,bg=bg); canvas.create_window((0,0),window=inner,anchor='nw')
+
+#         def refresh():
+#             for w in inner.winfo_children(): w.destroy()
+#             if not self.shelf:
+#                 tk.Label(inner,text='书架空空，快去添加书吧',font=('',10),bg=bg,fg=sel).pack(pady=30)
+#             for path,info in sorted(self.shelf.items(),key=lambda x:x[1].get('last_time',''),reverse=True):
+#                 self._shelf_card(inner,path,info,bg,fg,bar,sel,win,refresh)
+#             inner.update_idletasks()
+#             canvas.config(scrollregion=canvas.bbox('all'))
+#         refresh()
+
+#         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+#         win.geometry(f'380x460+{rx}+{ry}')
+
+#     def _shelf_card(self,parent,path,info,bg,fg,bar,sel,shelf_win,refresh):
+#         card=tk.Frame(parent,bg=bar,relief='flat',bd=0)
+#         card.pack(fill='x',padx=4,pady=3)
+#         # 封面色块
+#         colors=['#8f3f71','#458588','#d79921','#689d6a','#cc241d']
+#         ccolor=colors[hash(path)%len(colors)]
+#         cover=tk.Frame(card,bg=ccolor,width=36,height=50); cover.pack(side='left',padx=6,pady=6); cover.pack_propagate(False)
+#         tk.Label(cover,text='📖',font=('',14),bg=ccolor).pack(expand=True)
+#         # 信息
+#         info_f=tk.Frame(card,bg=bar); info_f.pack(side='left',fill='both',expand=True,pady=4)
+#         tk.Label(info_f,text=info.get('title','未知'),font=('',9,'bold'),bg=bar,fg=fg,anchor='w').pack(fill='x')
+#         lc=info.get('last_ch',0); tc=info.get('total_ch',1)
+#         pct=int(lc/max(1,tc-1)*100) if tc>1 else 0
+#         tk.Label(info_f,text=f'第{lc+1}/{tc}章  {pct}%',font=('',8),bg=bar,fg=sel,anchor='w').pack(fill='x')
+#         # 进度条
+#         pb_f=tk.Frame(info_f,bg=bar,height=4); pb_f.pack(fill='x',pady=2); pb_f.pack_propagate(False)
+#         pb_done=tk.Frame(pb_f,bg=ccolor,height=4); pb_done.place(x=0,y=0,relwidth=pct/100,relheight=1)
+#         tk.Frame(pb_f,bg=sel,height=4).place(x=0,y=0,relwidth=1,relheight=1)
+#         pb_done.lift()
+#         tk.Label(info_f,text=f'上次：{info.get("last_time","")}',font=('',7),bg=bar,fg=sel,anchor='w').pack(fill='x')
+#         # 按钮
+#         btn_f=tk.Frame(card,bg=bar); btn_f.pack(side='right',padx=6,pady=4)
+#         def open_it(p=path):
+#             shelf_win.destroy(); self.open_file(p)
+#         def del_it(p=path):
+#             if messagebox.askyesno('删除','从书架移除此书？',parent=shelf_win):
+#                 del self.shelf[p]; _jsave(SHELF_FILE,self.shelf); refresh()
+#         tk.Button(btn_f,text='阅读',font=('',8),relief='flat',bg=ccolor,fg='white',
+#                   padx=6,command=open_it).pack(pady=2)
+#         tk.Button(btn_f,text='移除',font=('',7),relief='flat',bg=bar,fg=sel,
+#                   padx=4,command=del_it).pack(pady=2)
+
+#     def _shelf_add(self, shelf_win):
+#         path=filedialog.askopenfilename(title='选择书籍',
+#             filetypes=[('小说文件','*.txt *.epub *.md'),('所有文件','*.*')])
+#         if not path: return
+#         if path not in self.shelf:
+#             title=os.path.splitext(os.path.basename(path))[0]
+#             self.shelf[path]={'title':title,'path':path,'last_ch':0,'total_ch':0,
+#                               'last_time':'','added_time':datetime.datetime.now().strftime('%Y-%m-%d')}
+#             _jsave(SHELF_FILE,self.shelf)
+#         shelf_win.destroy(); self.open_shelf()
+
+#     # ─────────────────────────────────────────────────
+#     # 渲染章节
+#     # ─────────────────────────────────────────────────
+#     def _render_chapter(self, scroll_to_top=True):
+#         if not self.chapters: return
+#         self.cur_ch=max(0,min(self.cur_ch,len(self.chapters)-1))
+#         ch=self.chapters[self.cur_ch]
+#         self.txt.config(state='normal'); self.txt.delete('1.0','end')
+#         self.txt.insert('1.0', ch['body']); self.txt.config(state='disabled')
+#         if scroll_to_top: self.txt.yview_moveto(0.0)
+#         self._update_nav(); self._wheel_accum=0
+#         self._shelf_update()
+
+#     def _update_nav(self):
+#         n=len(self.chapters); idx=self.cur_ch+1
+#         # 有无书签/笔记标记
+#         m_chs={m['ch'] for m in self.marks.get(self.book_path,[])}
+#         n_chs={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
+#         flags=('🔖' if self.cur_ch in m_chs else '')+('✏' if self.cur_ch in n_chs else '')
+#         self.lbl_prog.config(text=f'{flags}  第{idx}/{n}章')
+#         self.btn_prev.config(state='normal' if self.cur_ch>0   else 'disabled')
+#         self.btn_next.config(state='normal' if self.cur_ch<n-1 else 'disabled')
+
+#     def _on_yscroll(self,lo,hi): self.vsb.set(lo,hi)
+
+#     # ─────────────────────────────────────────────────
+#     # 翻章
+#     # ─────────────────────────────────────────────────
+#     def next_chapter(self):
+#         if self.chapters and self.cur_ch<len(self.chapters)-1:
+#             self.cur_ch+=1; self._render_chapter()
+
+#     def prev_chapter(self):
+#         if self.chapters and self.cur_ch>0:
+#             self.cur_ch-=1; self._render_chapter()
+
+#     def goto_chapter(self,idx):
+#         if not self.chapters: return
+#         self.cur_ch=max(0,min(idx,len(self.chapters)-1)); self._render_chapter()
+
+#     def _on_click(self,e):
+#         w=self.txt.winfo_width()
+#         if   e.x<w*0.28: self.prev_chapter()
+#         elif e.x>w*0.72: self.next_chapter()
+
+#     def _on_wheel(self,e):
+#         delta=1 if e.num==4 else (-1 if e.num==5 else (1 if e.delta>0 else -1))
+#         top,bot=self.txt.yview()
+#         if delta<0:
+#             if bot>=0.999:
+#                 self._wheel_accum-=1
+#                 if self._wheel_accum<=-3: self.next_chapter(); return
+#             else: self._wheel_accum=0; self.txt.yview_scroll(3,'units')
+#         else:
+#             if top<=0.001:
+#                 self._wheel_accum+=1
+#                 if self._wheel_accum>=3:
+#                     self.prev_chapter(); self.root.after(30,lambda:self.txt.yview_moveto(1.0)); return
+#             else: self._wheel_accum=0; self.txt.yview_scroll(-3,'units')
+
+#     def _scroll_down(self):
+#         _,bot=self.txt.yview()
+#         if bot>=0.999: self.next_chapter()
+#         else: self.txt.yview_scroll(1,'pages')
+
+#     # ─────────────────────────────────────────────────
+#     # TTS 听书
+#     # ─────────────────────────────────────────────────
+#     def toggle_tts(self):
+#         if not self.tts.available:
+#             messagebox.showinfo('提示','请先安装 pyttsx3：\npip install pyttsx3'); return
+#         if self._tts_playing:
+#             self.tts.stop(); self._tts_playing=False
+#             self.btn_tts.config(text='🔊')
+#             self._toast('⏹ 已停止朗读')
+#         else:
+#             if not self.chapters: return
+#             ch=self.chapters[self.cur_ch]
+#             self._tts_playing=True; self.btn_tts.config(text='⏸')
+#             self._toast('▶ 开始朗读…')
+#             def done(): self.root.after(0,self._tts_done)
+#             self.tts.speak(ch['body'],on_done=done)
+
+#     def _tts_done(self):
+#         self._tts_playing=False; self.btn_tts.config(text='🔊')
+
+#     # ─────────────────────────────────────────────────
+#     # 书签（O 键）
+#     # ─────────────────────────────────────────────────
+#     def add_mark(self):
+#         if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
+#         marks=self.marks.setdefault(self.book_path,[])
+#         ch=self.chapters[self.cur_ch]; now=datetime.datetime.now().strftime('%m-%d %H:%M')
+#         existing=next((m for m in marks if m['ch']==self.cur_ch),None)
+#         entry={'ch':self.cur_ch,'ch_title':ch['title'],'time':now}
+#         if existing: existing.update(entry); self._toast('🔖 书签已更新')
+#         else: marks.append(entry); self._toast(f'🔖 书签已添加  第{self.cur_ch+1}章')
+#         _jsave(MARKS_FILE,self.marks); self._update_nav()
+
+#     def open_marks(self):
+#         marks=self.marks.get(self.book_path,[])
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         win=tk.Toplevel(self.root); win.title('书签'); win.geometry('300x360')
+#         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+#         hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr,text='🔖 书签列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+#         tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+#         lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
+#         sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+#         lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+#                       selectforeground=fg,borderwidth=0,highlightthickness=0,
+#                       activestyle='none',yscrollcommand=sb2.set)
+#         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+#         rows=list(marks)
+#         for m in rows: lb.insert('end',f"  🏴 第{m['ch']+1}章  {m['ch_title']}  {m['time']}")
+#         bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+#         def jump():
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             win.destroy(); self.goto_chapter(rows[idxs[0]]['ch'])
+#         def delete():
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             m=rows.pop(idxs[0]); lb.delete(idxs[0])
+#             self.marks[self.book_path]=[x for x in self.marks.get(self.book_path,[]) if x is not m]
+#             _jsave(MARKS_FILE,self.marks); self._update_nav()
+#         tk.Button(bf,text='跳转',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
+#         tk.Button(bf,text='删除',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+#         lb.bind('<Double-Button-1>',lambda e:jump())
+#         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+#         win.geometry(f'300x360+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 笔记（N 键）
+#     # ─────────────────────────────────────────────────
+#     def add_note(self):
+#         if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
+#         ch=self.chapters[self.cur_ch]
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         win=tk.Toplevel(self.root); win.title('添加笔记'); win.geometry('340x260')
+#         win.attributes('-topmost',True); win.configure(bg=bg)
+#         hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr,text=f'✏ 笔记 — {ch["title"][:20]}',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+#         tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+#         # 选中文字自动填入
+#         sel_text=''
+#         try: sel_text=self.txt.get(tk.SEL_FIRST,tk.SEL_LAST)
+#         except: pass
+#         if sel_text:
+#             tk.Label(win,text='引用文字：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
+#             ref=tk.Label(win,text=sel_text[:80]+'…' if len(sel_text)>80 else sel_text,
+#                         font=('',8,'italic'),bg=sel,fg=fg,wraplength=300,anchor='w',justify='left')
+#             ref.pack(fill='x',padx=8,pady=2)
+#         tk.Label(win,text='笔记内容：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
+#         ta=tk.Text(win,height=6,font=('',10),bg=bg,fg=fg,insertbackground=fg,
+#                    relief='flat',padx=8,pady=4,wrap='word',borderwidth=1,highlightthickness=1,
+#                    highlightbackground=sel,highlightcolor=fg)
+#         ta.pack(fill='both',expand=True,padx=8,pady=4); ta.focus()
+#         def save():
+#             content=ta.get('1.0','end').strip()
+#             if not content: win.destroy(); return
+#             notes=self.notes.setdefault(self.book_path,[])
+#             now=datetime.datetime.now().strftime('%m-%d %H:%M')
+#             notes.append({'ch':self.cur_ch,'ch_title':ch['title'],'content':content,
+#                           'quote':sel_text,'time':now})
+#             _jsave(NOTES_FILE,self.notes); self._update_nav(); win.destroy()
+#             self._toast('✏ 笔记已保存')
+#         bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=8,pady=4)
+#         tk.Button(bf,text='保存笔记',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',
+#                   padx=10,command=save).pack(side='right',padx=4)
+#         win.bind('<Control-Return>',lambda e:save())
+
+#     def open_notes(self):
+#         notes=self.notes.get(self.book_path,[])
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         win=tk.Toplevel(self.root); win.title('笔记'); win.geometry('360x480')
+#         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+#         hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr,text='✏ 笔记列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+#         tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+
+#         # 列表 + 详情
+#         paned=tk.PanedWindow(win,orient='vertical',bg=bg,sashwidth=4,sashrelief='flat')
+#         paned.pack(fill='both',expand=True,padx=4,pady=4)
+
+#         top_f=tk.Frame(paned,bg=bg); paned.add(top_f,height=200)
+#         sb2=tk.Scrollbar(top_f); sb2.pack(side='right',fill='y')
+#         lb=tk.Listbox(top_f,font=('',9),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+#                       selectforeground=fg,borderwidth=0,highlightthickness=0,
+#                       activestyle='none',yscrollcommand=sb2.set)
+#         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+#         rows=list(notes)
+#         for n2 in rows: lb.insert('end',f"  第{n2['ch']+1}章  {n2['ch_title'][:16]}  {n2['time']}")
+
+#         bot_f=tk.Frame(paned,bg=bg); paned.add(bot_f)
+#         detail=tk.Text(bot_f,font=('',10),bg=bg,fg=fg,insertbackground=fg,
+#                        relief='flat',padx=8,pady=6,wrap='word',state='disabled',
+#                        borderwidth=0,highlightthickness=0)
+#         detail.pack(fill='both',expand=True)
+
+#         def show_detail(event=None):
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             n2=rows[idxs[0]]
+#             detail.config(state='normal'); detail.delete('1.0','end')
+#             if n2.get('quote'): detail.insert('end',f'引用：{n2["quote"]}\n\n','quote')
+#             detail.insert('end',n2['content'])
+#             detail.config(state='disabled')
+#         lb.bind('<<ListboxSelect>>',show_detail)
+
+#         bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+#         def jump():
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             win.destroy(); self.goto_chapter(rows[idxs[0]]['ch'])
+#         def delete():
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             n2=rows.pop(idxs[0]); lb.delete(idxs[0])
+#             self.notes[self.book_path]=[x for x in self.notes.get(self.book_path,[]) if x is not n2]
+#             _jsave(NOTES_FILE,self.notes); self._update_nav()
+#             detail.config(state='normal'); detail.delete('1.0','end'); detail.config(state='disabled')
+#         tk.Button(bf,text='跳转章节',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
+#         tk.Button(bf,text='删除笔记',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+#         lb.bind('<Double-Button-1>',lambda e:jump())
+#         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+#         win.geometry(f'360x480+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 章节目录
+#     # ─────────────────────────────────────────────────
+#     def open_chapters(self):
+#         if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
+#         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+#         mark_set={m['ch'] for m in self.marks.get(self.book_path,[])}
+#         note_set={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
+#         win=tk.Toplevel(self.root); win.title('章节目录'); win.geometry('300x500')
+#         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+#         hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr,text='📑 章节目录',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
+#         tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
+#         sf=tk.Frame(win,bg=bg); sf.pack(fill='x',padx=6,pady=(6,2))
+#         sv=tk.StringVar()
+#         se=tk.Entry(sf,textvariable=sv,font=('',9),bg=bg,fg=fg,insertbackground=fg,relief='groove')
+#         se.pack(fill='x',ipady=3)
+#         PH='搜索章节名...'
+#         se.insert(0,PH); se.config(fg='gray')
+#         se.bind('<FocusIn>',lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
+#         se.bind('<FocusOut>',lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
+#         lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
+#         sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+#         lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
+#                       selectforeground=fg,borderwidth=0,highlightthickness=0,
+#                       activestyle='none',yscrollcommand=sb2.set)
+#         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+#         btn_j=tk.Button(win,text='↩ 跳转',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',pady=5)
+#         btn_j.pack(fill='x',padx=6,pady=4)
+#         all_ch=list(self.chapters); visible=list(range(len(all_ch)))
+#         def fill(indices):
+#             visible.clear(); visible.extend(indices); lb.delete(0,'end')
+#             for i in indices:
+#                 flags=('🔖' if i in mark_set else '')+('✏' if i in note_set else '')
+#                 cur='▶ ' if i==self.cur_ch else '  '
+#                 lb.insert('end',f'{cur}{i+1}. {all_ch[i]["title"]}{flags}')
+#         fill(range(len(all_ch)))
+#         try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
+#         except: pass
+#         def on_search(*_):
+#             q=sv.get().strip()
+#             fill(range(len(all_ch))) if q in ('',PH) else fill([i for i,c in enumerate(all_ch) if q in c['title']])
+#         sv.trace_add('write',on_search)
+#         def jump(e=None):
+#             idxs=lb.curselection()
+#             if not idxs: return
+#             win.destroy(); self.goto_chapter(visible[idxs[0]])
+#         btn_j.config(command=jump); lb.bind('<Double-Button-1>',jump); lb.bind('<Return>',jump)
+#         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+#         win.geometry(f'300x500+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # Toast 提示
+#     # ─────────────────────────────────────────────────
+#     def _toast(self,msg,ms=1500):
+#         t=self._cur_theme()
+#         try:
+#             for w in self.root.winfo_children():
+#                 if isinstance(w,tk.Label) and getattr(w,'_is_toast',False): w.destroy()
+#         except: pass
+#         toast=tk.Label(self.root,text=msg,font=('',8),bg=t['bar'],fg=t['fg'],
+#                        padx=10,pady=4,relief='flat')
+#         toast._is_toast=True
+#         toast.place(relx=0.5,rely=0.06,anchor='n')
+#         self.root.after(ms,lambda: (toast.winfo_exists() and toast.destroy()))
+
+#     # ─────────────────────────────────────────────────
+#     # 欢迎页
+#     # ─────────────────────────────────────────────────
+#     def _show_welcome(self):
+#         self.txt.config(state='normal'); self.txt.delete('1.0','end')
+#         self.txt.insert('1.0',(
+#             '\n\n\n'
+#             '        📚  摸鱼阅读器  v8.5\n\n'
+#             '  支持：TXT  /  EPUB  /  MD\n\n'
+#             '  顶部按钮：书架  目录  笔记  书签  打开\n\n'
+#             '  操作：\n'
+#             '    滚轮 / 拖拽右侧滚动条  章内滚动\n'
+#             '    滚到章末再滚           切下一章\n'
+#             '    点击左侧 28% / 右侧    切上下章\n'
+#             '    ← →  切章   S/↓  翻屏\n\n'
+#             '  快捷键：\n'
+#             '    O        添加书签\n'
+#             '    N        添加笔记\n'
+#             '    F5       开始/停止朗读\n'
+#             '    Ctrl+D   老板键(Word伪装)\n'
+#             '    D+E      最小化\n'
+#         ))
+#         self.txt.config(state='disabled')
+
+#     # ─────────────────────────────────────────────────
+#     # 最小化
+#     # ─────────────────────────────────────────────────
+#     def toggle_minimize(self):
+#         self._minimized=not self._minimized
+#         if self._minimized:
+#             self._saved_h=self.root.winfo_height()
+#             for w in (self.setbar,self.sep,self.txt_frame,self.bot_area): w.pack_forget()
+#             self.root.geometry(f'{self.root.winfo_width()}x30')
+#         else:
+#             self.root.geometry(f'{self.root.winfo_width()}x{self._saved_h}')
+#             self.sep.pack(fill='x',after=self.topbar)
+#             if self._settings_open: self.setbar.pack(fill='x',after=self.topbar); self._retheme_setbar()
+#             self.txt_frame.pack(fill='both',expand=True)
+#             self.bot_area.pack(fill='x',side='bottom')
+
+#     def toggle_settings(self):
+#         self._settings_open=not self._settings_open
+#         if self._settings_open: self.setbar.pack(fill='x',after=self.topbar); self._retheme_setbar()
+#         else: self.setbar.pack_forget()
+
+#     # ─────────────────────────────────────────────────
+#     # 全文搜索（Ctrl+F）
+#     # ─────────────────────────────────────────────────
+#     def open_search(self):
+#         if not self.chapters:
+#             messagebox.showinfo('提示', '请先打开小说'); return
+
+#         t = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+#         if hasattr(self, '_search_win') and self._search_win.winfo_exists():
+#             self._search_win.lift(); self._search_win.focus_force(); return
+
+#         win = tk.Toplevel(self.root)
+#         win.title('全文搜索')
+#         win.geometry('480x560')
+#         win.resizable(True, True)
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+#         self._search_win = win
+
+#         top = tk.Frame(win, bg=bar); top.pack(fill='x', padx=0, pady=0)
+#         tk.Label(top, text='🔍', font=('',11), bg=bar, fg=fg).pack(side='left', padx=8, pady=6)
+
+#         sv = tk.StringVar()
+#         entry = tk.Entry(top, textvariable=sv, font=('',11), bg=bg, fg=fg,
+#                          insertbackground=fg, relief='flat', bd=0)
+#         entry.pack(side='left', fill='x', expand=True, ipady=4)
+
+#         var_case  = tk.BooleanVar(value=False)
+#         var_regex = tk.BooleanVar(value=False)
+#         tk.Checkbutton(top, text='Aa', variable=var_case, font=('',8),
+#                        bg=bar, fg=fg, activebackground=bar,
+#                        selectcolor=bg).pack(side='left', padx=2)
+#         tk.Checkbutton(top, text='.*', variable=var_regex, font=('',8),
+#                        bg=bar, fg=fg, activebackground=bar,
+#                        selectcolor=bg).pack(side='left', padx=2)
+
+#         lbl_count = tk.Label(top, text='', font=('',8), bg=bar, fg=sel)
+#         lbl_count.pack(side='left', padx=6)
+#         tk.Button(top, text='×', relief='flat', font=('',10),
+#                   bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
+
+#         sep2 = tk.Frame(win, height=1, bg=sel); sep2.pack(fill='x')
+
+#         list_frame = tk.Frame(win, bg=bg); list_frame.pack(fill='both', expand=True)
+#         sb2 = tk.Scrollbar(list_frame); sb2.pack(side='right', fill='y')
+#         lb = tk.Listbox(list_frame, font=('',9), relief='flat', bg=bg, fg=fg,
+#                         selectbackground=sel, selectforeground=fg,
+#                         borderwidth=0, highlightthickness=0,
+#                         activestyle='none', yscrollcommand=sb2.set)
+#         lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
+
+#         sep3 = tk.Frame(win, height=1, bg=sel); sep3.pack(fill='x')
+#         preview_frame = tk.Frame(win, bg=bg, height=130)
+#         preview_frame.pack(fill='x', padx=0); preview_frame.pack_propagate(False)
+
+#         preview = tk.Text(preview_frame, font=('',9), bg=bg, fg=fg,
+#                           relief='flat', padx=12, pady=6, wrap='word',
+#                           state='disabled', borderwidth=0, highlightthickness=0)
+#         preview.pack(fill='both', expand=True)
+#         preview.tag_config('hit',  background='#d79921', foreground='#1d2021')
+#         preview.tag_config('info', foreground=sel)
+
+#         bot_f = tk.Frame(win, bg=bar, height=30)
+#         bot_f.pack(fill='x'); bot_f.pack_propagate(False)
+#         lbl_loc = tk.Label(bot_f, text='', font=('',8), bg=bar, fg=fg)
+#         lbl_loc.pack(side='left', padx=8, pady=4)
+#         btn_jump = tk.Button(bot_f, text='↩ 跳转到此处', font=('',8,'bold'),
+#                              bg=bar, fg=fg, relief='flat', padx=8,
+#                              state='disabled')
+#         btn_jump.pack(side='right', padx=8, pady=3)
+
+#         results = []
+
+#         def do_search(*_):
+#             results.clear(); lb.delete(0, 'end')
+#             query = sv.get().strip()
+#             if not query:
+#                 lbl_count.config(text=''); return
+
+#             flags = 0 if var_case.get() else re.IGNORECASE
+#             try:
+#                 if var_regex.get(): pat = re.compile(query, flags)
+#                 else:               pat = re.compile(re.escape(query), flags)
+#             except re.error as e:
+#                 lbl_count.config(text=f'正则错误: {e}'); return
+
+#             CONTEXT = 40
+#             for ci, ch in enumerate(self.chapters):
+#                 for m in pat.finditer(ch['body']):
+#                     s, e2 = m.start(), m.end()
+#                     pre  = ch['body'][max(0, s-CONTEXT):s].replace('\n', ' ')
+#                     hit  = ch['body'][s:e2]
+#                     post = ch['body'][e2:min(len(ch['body']), e2+CONTEXT)].replace('\n', ' ')
+#                     snippet = (pre, hit, post)
+#                     results.append((ci, s, e2, snippet))
+
+#             lbl_count.config(text=f'共 {len(results)} 处')
+#             for ci, s, e2, (pre, hit, post) in results:
+#                 ch_title = self.chapters[ci]['title']
+#                 display  = f"  第{ci+1}章  {ch_title[:14]}…  「{hit[:20]}」"
+#                 lb.insert('end', display)
+
+#             preview.config(state='normal'); preview.delete('1.0','end')
+#             preview.config(state='disabled')
+#             lbl_loc.config(text='')
+#             btn_jump.config(state='disabled')
+
+#         sv.trace_add('write', do_search)
+#         var_case.trace_add('write',  do_search)
+#         var_regex.trace_add('write', do_search)
+
+#         def on_select(event=None):
+#             idxs = lb.curselection()
+#             if not idxs: return
+#             ci, s, e2, (pre, hit, post) = results[idxs[0]]
+#             ch = self.chapters[ci]
+
+#             preview.config(state='normal'); preview.delete('1.0','end')
+#             preview.insert('end', f'第{ci+1}章  {ch["title"]}\n', 'info')
+#             preview.insert('end', '…' + pre)
+#             preview.insert('end', hit, 'hit')
+#             preview.insert('end', post + '…')
+#             preview.config(state='disabled')
+
+#             lbl_loc.config(text=f'第{ci+1}章 · 位置 {s}')
+#             btn_jump.config(state='normal', command=lambda: _jump(ci, s, e2, hit))
+
+#         def _jump(ci, s, e2, hit):
+#             self.goto_chapter(ci)
+#             win.lift()
+#             self.root.after(80, lambda: _highlight_in_txt(hit))
+
+#         def _highlight_in_txt(hit):
+#             self.txt.tag_remove('search_hit', '1.0', 'end')
+#             self.txt.tag_config('search_hit', background='#d79921', foreground='#1d2021')
+#             start = '1.0'
+#             while True:
+#                 pos = self.txt.search(hit, start, nocase=not var_case.get(), stopindex='end')
+#                 if not pos: break
+#                 end_pos = f'{pos}+{len(hit)}c'
+#                 self.txt.tag_add('search_hit', pos, end_pos)
+#                 self.txt.see(pos)
+#                 start = end_pos
+
+#         lb.bind('<<ListboxSelect>>', on_select)
+#         lb.bind('<Double-Button-1>', lambda e: btn_jump.invoke())
+#         lb.bind('<Return>',         lambda e: btn_jump.invoke())
+
+#         entry.focus()
+#         try:
+#             sel_text = self.txt.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
+#             if sel_text and '\n' not in sel_text:
+#                 sv.set(sel_text)
+#         except: pass
+
+#         rx = self.root.winfo_x() + self.root.winfo_width() + 8
+#         ry = self.root.winfo_y()
+#         win.geometry(f'480x560+{rx}+{ry}')
+
+#     # ─────────────────────────────────────────────────
+#     # 章节摘要（Ctrl+M）—— 双模型切换支持
+#     # ─────────────────────────────────────────────────
+#     def open_summary(self):
+#         """章节摘要——多模式，支持 GLM 和 MiniMax 切换"""
+#         if not self.chapters:
+#             messagebox.showinfo('提示', '请先打开小说'); return
+
+#         class State:
+#             ch_body  = self.chapters[self.cur_ch]['body']
+#             ch_title = self.chapters[self.cur_ch]['title']
+#             ch_idx   = self.cur_ch
+#             result   = ''
+#             running  = False
+
+#         st  = State()
+#         _t  = self._cur_theme()
+#         _bg, _fg, _bar, _sel = _t['bg'], _t['fg'], _t['bar'], _t['sel']
+
+#         dlg = tk.Toplevel(self.root)
+#         dlg.title('章节摘要')
+#         dlg.geometry('480x540')
+#         dlg.resizable(True, True)
+#         dlg.attributes('-topmost', True)
+#         dlg.configure(bg=_bg)
+
+#         # ── 顶部信息栏 ────────────────────────────────
+#         top = tk.Frame(dlg, bg=_bar, height=34)
+#         top.pack(fill='x'); top.pack_propagate(False)
+#         _cc = len(st.ch_body)
+#         _pc = len([p for p in st.ch_body.split('\n') if p.strip()])
+#         tk.Label(top, text=f'  ✨  {st.ch_title}',
+#                  font=('',9,'bold'), bg=_bar, fg=_fg, anchor='w'
+#                  ).pack(side='left', fill='x', expand=True, padx=6, pady=7)
+#         tk.Label(top, text=f'{_cc} 字  {_pc} 段',
+#                  font=('',8), bg=_bar, fg=_sel).pack(side='right', padx=6)
+#         tk.Button(top, text='×', relief='flat', font=('',11),
+#                   bg=_bar, fg=_fg, bd=0, command=dlg.destroy).pack(side='right', padx=4)
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+
+#         # ── 选项行 ────────────────────────────────────
+#         opt = tk.Frame(dlg, bg=_bar)
+#         opt.pack(fill='x', padx=10, pady=6)
+
+#         # 长度
+#         tk.Label(opt, text='长度', font=('',8,'bold'), bg=_bar, fg=_fg).pack(side='left')
+#         v_len = tk.StringVar(value='简短')
+#         _len_opts = [
+#             ('简短', '简短', '50~80字，一句话总结'),
+#             ('标准', '标准', '150字，含人物/情节/转折'),
+#             ('详细', '详细', '300字，完整剧情分析'),
+#         ]
+#         for _val, _lbl, _tip in _len_opts:
+#             _rb = tk.Radiobutton(opt, text=_lbl, variable=v_len, value=_val,
+#                                  font=('',8), bg=_bar, fg=_fg,
+#                                  activebackground=_bar, selectcolor=_bg)
+#             _rb.pack(side='left', padx=4)
+
+#         tk.Label(opt, text='   风格', font=('',8,'bold'), bg=_bar, fg=_fg).pack(side='left')
+#         v_style = tk.StringVar(value='客观')
+#         _style_opts = [('客观','客观'), ('活泼','活泼'), ('学术','学术')]
+#         for _val, _lbl in _style_opts:
+#             tk.Radiobutton(opt, text=_lbl, variable=v_style, value=_val,
+#                            font=('',8), bg=_bar, fg=_fg,
+#                            activebackground=_bar, selectcolor=_bg).pack(side='left', padx=4)
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+
+#         # ── 摘要展示区 ────────────────────────────────
+#         mid = tk.Frame(dlg, bg=_bg)
+#         mid.pack(fill='both', expand=True)
+#         _vsb2 = tk.Scrollbar(mid, width=6)
+#         _vsb2.pack(side='right', fill='y')
+#         out = tk.Text(mid, font=(self.font_fam, self.font_size+1),
+#                       bg=_bg, fg=_fg, insertbackground=_fg, selectbackground=_sel,
+#                       relief='flat', padx=20, pady=16, wrap='word',
+#                       borderwidth=0, highlightthickness=0, state='disabled',
+#                       yscrollcommand=_vsb2.set, spacing1=4, spacing3=4)
+#         out.pack(side='left', fill='both', expand=True)
+#         _vsb2.config(command=out.yview)
+#         out.tag_config('hint',    foreground=_sel)
+#         out.tag_config('warn',    foreground='#cc241d')
+#         out.tag_config('loading', foreground=_sel, font=(self.font_fam, self.font_size, 'italic'))
+#         out.tag_config('result',  foreground=_fg,
+#                        font=(self.font_fam, self.font_size+1), spacing1=6, spacing3=4)
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+
+#         # ── 底部操作栏 ────────────────────────────────
+#         bot = tk.Frame(dlg, bg=_bar, height=50)
+#         bot.pack(fill='x', side='bottom'); bot.pack_propagate(False)
+
+#         btn_gen = tk.Button(bot, text='▶  开始生成摘要',
+#                             font=('',10,'bold'),
+#                             bg=_fg, fg=_bg,
+#                             activebackground=_sel, activeforeground=_fg,
+#                             relief='flat', bd=0, padx=18, pady=5, cursor='hand2')
+#         btn_gen.pack(side='left', padx=12, pady=10)
+
+#         btn_copy = tk.Button(bot, text='复制', font=('',9),
+#                              bg=_bar, fg=_fg, relief='flat', padx=8,
+#                              state='disabled', cursor='hand2')
+#         btn_copy.pack(side='left', padx=3, pady=10)
+
+#         btn_note = tk.Button(bot, text='存为笔记', font=('',9),
+#                              bg=_bar, fg=_fg, relief='flat', padx=8,
+#                              state='disabled', cursor='hand2')
+#         btn_note.pack(side='left', padx=3, pady=10)
+
+#         lbl_st = tk.Label(bot, text='', font=('',8), bg=_bar, fg=_sel)
+#         lbl_st.pack(side='right', padx=12)
+
+#         # ── 工具函数 ──────────────────────────────────
+#         def _show(text, tag='result'):
+#             out.config(state='normal')
+#             out.delete('1.0', 'end')
+#             out.insert('end', text, tag)
+#             out.config(state='disabled')
+#             out.yview_moveto(0.0)
+
+#         def _build_prompt():
+#             _len_map = {
+#                 '简短': '50~80字，用一两句话概括最核心的内容',
+#                 '标准': '150字左右，包含主要人物、核心情节、关键转折',
+#                 '详细': '300字左右，完整分析人物行为、情节发展、伏笔与高潮',
+#             }
+#             _sty_map = {
+#                 '客观': '语言客观简洁，不带情感色彩',
+#                 '活泼': '语言生动活泼，适当使用emoji增加趣味',
+#                 '学术': '语言严谨，条理清晰，使用文学分析术语',
+#             }
+#             _clip = st.ch_body[:5000]
+#             return (
+#                 f"请对以下小说章节做摘要。\n"
+#                 f"要求长度：{_len_map[v_len.get()]}\n"
+#                 f"要求风格：{_sty_map[v_style.get()]}\n"
+#                 f"直接输出摘要，不要标题、序号、前缀。\n\n"
+#                 f"【{st.ch_title}】\n{_clip}"
+#             )
+
+#         def _on_ok(text):
+#             st.result  = text
+#             st.running = False
+#             _show(text, 'result')
+#             btn_gen.config(state='normal', text='↺  重新生成')
+#             btn_copy.config(state='normal')
+#             btn_note.config(state='normal')
+#             lbl_st.config(text=f'已生成 · {len(text)} 字')
+
+#         def _on_err(msg):
+#             st.running = False
+#             btn_gen.config(state='normal', text='▶  开始生成摘要')
+            
+#             if msg.startswith('NO_KEY_'):
+#                 _model = msg.replace('NO_KEY_', '')
+#                 _fname = 'api_key_minimax.txt' if _model == 'MiniMax' else 'api_key.txt'
+#                 _show(
+#                     f'⚠  未找到 {_model} 的 API Key\n\n'
+#                     f'请在程序同目录新建文件：{_fname}\n'
+#                     f'将 API Key 粘贴进去保存即可。',
+#                     'warn'
+#                 )
+#             else:
+#                 _show(f'⚠  生成失败\n\n{msg}', 'warn')
+
+#         def _do_gen():
+#             if st.running: return
+#             st.running = True
+#             btn_gen.config(state='disabled', text='生成中…')
+#             btn_copy.config(state='disabled')
+#             btn_note.config(state='disabled')
+#             lbl_st.config(text='')
+#             _len_label = v_len.get()
+#             _sty_label = v_style.get()
+            
+#             _model_choice = self.var_ai_model.get()
+#             _show(f'[{_model_choice}] 正在生成【{_len_label}·{_sty_label}】摘要，请稍候…', 'loading')
+
+#             def worker():
+#                 import urllib.request as _ureq
+#                 import urllib.error   as _uerr
+#                 import json           as _ujson
+
+#                 if _model_choice == 'MiniMax':
+#                     _key = _get_api_key('MiniMax')
+#                     _url = 'https://api.minimax.chat/v1/chat/completions'
+#                     _model_name = 'abab6.5s-chat'
+#                 else:
+#                     _key = _get_api_key('GLM')
+#                     _url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+#                     _model_name = 'glm-4-flash'
+
+#                 if not _key:
+#                     dlg.after(0, lambda: _on_err(f'NO_KEY_{_model_choice}'))
+#                     return
+
+#                 _tok_map = {'简短': 150, '标准': 400, '详细': 700}
+#                 _maxtok  = _tok_map.get(_len_label, 400)
+#                 _prompt  = _build_prompt()
+                
+#                 _payload = _ujson.dumps({
+#                     'model':       _model_name,
+#                     'max_tokens':  _maxtok,
+#                     'temperature': 0.6,
+#                     'messages':    [{'role': 'user', 'content': _prompt}],
+#                 }).encode('utf-8')
+
+#                 _req = _ureq.Request(
+#                     _url,
+#                     data    = _payload,
+#                     headers = {'Content-Type': 'application/json',
+#                                'Authorization': f'Bearer {_key}'},
+#                     method  = 'POST',
+#                 )
+#                 try:
+#                     with _ureq.urlopen(_req, timeout=30) as _resp:
+#                         _raw   = _resp.read().decode('utf-8')
+#                         _pdata = _ujson.loads(_raw)
+#                         _text  = _pdata['choices'][0]['message']['content'].strip()
+#                     dlg.after(0, lambda t=_text: _on_ok(t))
+#                 except _uerr.HTTPError as _he:
+#                     _hbody = _he.read().decode('utf-8', errors='replace')
+#                     try:    _hemsg = _ujson.loads(_hbody).get('error',{}).get('message', _hbody)
+#                     except: _hemsg = _hbody[:200]
+#                     dlg.after(0, lambda c=str(_he.code), m=_hemsg: _on_err(f'HTTP {c}：{m}'))
+#                 except Exception as _exc:
+#                     dlg.after(0, lambda m=str(_exc): _on_err(m))
+
+#             threading.Thread(target=worker, daemon=True).start()
+
+#         def _do_copy():
+#             if not st.result: return
+#             dlg.clipboard_clear(); dlg.clipboard_append(st.result)
+#             lbl_st.config(text='已复制 ✓')
+#             dlg.after(1800, lambda: lbl_st.config(text=f'已生成 · {len(st.result)} 字'))
+
+#         def _do_save():
+#             if not st.result: return
+#             _nl = self.notes.setdefault(self.book_path, [])
+#             _nl.append({'ch': st.ch_idx, 'ch_title': st.ch_title,
+#                         'content': f'[AI摘要·{v_len.get()}·{v_style.get()}]\n{st.result}',
+#                         'quote': '', 'time': datetime.datetime.now().strftime('%m-%d %H:%M')})
+#             _jsave(NOTES_FILE, self.notes)
+#             self._update_nav()
+#             self._toast('✏ 摘要已存为笔记')
+#             lbl_st.config(text='已保存为笔记 ✓')
+
+#         btn_gen.config(command=_do_gen)
+#         btn_copy.config(command=_do_copy)
+#         btn_note.config(command=_do_save)
+
+#         _show(
+#             f'选择长度和风格，点击「▶ 开始生成摘要」。\n'
+#             f'当前调用的模型将使用设置中选中的 AI 模型。\n\n'
+#             f'· 简短：一两句话抓核心\n'
+#             f'· 标准：150字含人物/情节/转折\n'
+#             f'· 详细：300字完整分析',
+#             'hint'
+#         )
+
+#         _rx = self.root.winfo_x() + self.root.winfo_width() + 10
+#         _ry = self.root.winfo_y()
+#         dlg.geometry(f'480x540+{_rx}+{_ry}')
+
+
+#     # ─────────────────────────────────────────────────
+#     # AI 章节查找（Ctrl+G）—— 双模型切换支持
+#     # ─────────────────────────────────────────────────
+#     def open_chapter_finder(self):
+#         """用自然语言描述模糊记忆，AI 分析最匹配的章节"""
+#         if not self.chapters:
+#             messagebox.showinfo('提示', '请先打开小说'); return
+
+#         class State:
+#             running = False
+#             results = []   # [{'rank':int,'ch_idx':int,'ch_title':str,'reason':str,'score':int}]
+
+#         st  = State()
+#         _t  = self._cur_theme()
+#         _bg, _fg, _bar, _sel = _t['bg'], _t['fg'], _t['bar'], _t['sel']
+
+#         dlg = tk.Toplevel(self.root)
+#         dlg.title('AI 章节查找')
+#         dlg.geometry('500x620')
+#         dlg.resizable(True, True)
+#         dlg.attributes('-topmost', True)
+#         dlg.configure(bg=_bg)
+
+#         # ── 顶部标题栏 ────────────────────────────────
+#         top = tk.Frame(dlg, bg=_bar, height=34)
+#         top.pack(fill='x'); top.pack_propagate(False)
+#         tk.Label(top, text='  🔍  AI 章节查找',
+#                  font=('',10,'bold'), bg=_bar, fg=_fg).pack(side='left', padx=8, pady=7)
+#         tk.Label(top, text=f'共 {len(self.chapters)} 章',
+#                  font=('',8), bg=_bar, fg=_sel).pack(side='right', padx=8)
+#         tk.Button(top, text='×', relief='flat', font=('',11),
+#                   bg=_bar, fg=_fg, bd=0, command=dlg.destroy).pack(side='right', padx=4)
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+
+#         # ── 输入区 ────────────────────────────────────
+#         inp_wrap = tk.Frame(dlg, bg=_bg)
+#         inp_wrap.pack(fill='x', padx=12, pady=(10, 0))
+
+#         tk.Label(inp_wrap,
+#                  text='描述你记得的情节、场景、人物对话或感受：',
+#                  font=('',9), bg=_bg, fg=_fg, anchor='w').pack(fill='x')
+
+#         inp = tk.Text(inp_wrap,
+#                       font=(self.font_fam, self.font_size),
+#                       bg=_bar, fg=_fg, insertbackground=_fg,
+#                       relief='flat', padx=10, pady=8,
+#                       wrap='word', height=4,
+#                       borderwidth=1, highlightthickness=1,
+#                       highlightbackground=_sel, highlightcolor=_fg)
+#         inp.pack(fill='x', pady=(4, 0))
+
+#         _PH = '例如：有一章写到主角第一次失败，很沮丧，在雨中独自走路……'
+#         inp.insert('1.0', _PH); inp.config(fg=_sel)
+#         def _focus_in(e):
+#             if inp.get('1.0','end-1c') == _PH:
+#                 inp.delete('1.0','end'); inp.config(fg=_fg)
+#         def _focus_out(e):
+#             if not inp.get('1.0','end-1c').strip():
+#                 inp.insert('1.0', _PH); inp.config(fg=_sel)
+#         inp.bind('<FocusIn>',  _focus_in)
+#         inp.bind('<FocusOut>', _focus_out)
+
+#         # ── 【核心优化】范围与参数配置行 ───────────────
+#         opt_frame = tk.Frame(inp_wrap, bg=_bg)
+#         opt_frame.pack(fill='x', pady=(8,0))
+        
+#         # 1. 搜索范围选择器
+#         tk.Label(opt_frame, text='搜索范围：', font=('',8), bg=_bg, fg=_fg).pack(side='left')
+        
+#         CHUNK_SIZE = 500
+#         total_ch = len(self.chapters)
+#         range_opts = []
+#         for i in range(0, total_ch, CHUNK_SIZE):
+#             end = min(i + CHUNK_SIZE, total_ch)
+#             range_opts.append(f"第{i+1}-{end}章")
+        
+#         if total_ch > CHUNK_SIZE:
+#             range_opts.append("全书 (仅匹配标题不含正文)")
+            
+#         v_range = tk.StringVar(value=range_opts[0] if range_opts else "全部")
+#         cb_range = ttk.Combobox(opt_frame, textvariable=v_range, values=range_opts,
+#                                 width=18, font=('',8), state='readonly')
+#         cb_range.pack(side='left', padx=2)
+
+#         # 2. 返回数量
+#         tk.Label(opt_frame, text='  返回数：', font=('',8), bg=_bg, fg=_fg).pack(side='left', padx=(6,0))
+#         v_cnt = tk.IntVar(value=3)
+#         cb_cnt = ttk.Combobox(opt_frame, textvariable=v_cnt, values=[1, 3, 5],
+#                               width=3, font=('',8), state='readonly')
+#         cb_cnt.pack(side='left', padx=2)
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x', pady=(10,0))
+
+#         # ── 结果展示区（上：列表 / 下：详情） ─────────
+#         pane = tk.PanedWindow(dlg, orient='vertical', bg=_bg,
+#                               sashwidth=5, sashrelief='flat', sashpad=2)
+#         pane.pack(fill='both', expand=True, padx=0, pady=0)
+
+#         list_frame = tk.Frame(pane, bg=_bg)
+#         pane.add(list_frame, height=180)
+#         _lsb = tk.Scrollbar(list_frame, width=6)
+#         _lsb.pack(side='right', fill='y')
+#         result_lb = tk.Listbox(list_frame, font=('',10), relief='flat',
+#                                bg=_bg, fg=_fg, selectbackground=_sel, selectforeground=_fg,
+#                                borderwidth=0, highlightthickness=0,
+#                                activestyle='none', yscrollcommand=_lsb.set)
+#         result_lb.pack(fill='both', expand=True)
+#         _lsb.config(command=result_lb.yview)
+
+#         detail_frame = tk.Frame(pane, bg=_bg)
+#         pane.add(detail_frame, height=140)
+#         detail = tk.Text(detail_frame, font=(self.font_fam, self.font_size),
+#                          bg=_bar, fg=_fg, insertbackground=_fg, relief='flat',
+#                          padx=14, pady=10, wrap='word', borderwidth=0, highlightthickness=0, state='disabled')
+#         detail.pack(fill='both', expand=True)
+#         detail.tag_config('title',  font=(self.font_fam, self.font_size, 'bold'))
+#         detail.tag_config('score',  foreground=_sel)
+#         detail.tag_config('reason', foreground=_fg)
+#         detail.tag_config('hint',   foreground=_sel, font=(self.font_fam, self.font_size, 'italic'))
+#         detail.tag_config('warn',   foreground='#cc241d')
+
+#         tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+
+#         # ── 底部操作栏 ────────────────────────────────
+#         bot = tk.Frame(dlg, bg=_bar, height=46)
+#         bot.pack(fill='x', side='bottom'); bot.pack_propagate(False)
+
+#         btn_find = tk.Button(bot, text='🔍  开始分析', font=('',10,'bold'),
+#                              bg=_fg, fg=_bg, activebackground=_sel, activeforeground=_fg,
+#                              relief='flat', bd=0, padx=16, pady=4, cursor='hand2')
+#         btn_find.pack(side='left', padx=12, pady=8)
+
+#         btn_goto = tk.Button(bot, text='↩ 跳转到此章', font=('',9),
+#                              bg=_bar, fg=_fg, relief='flat', padx=8,
+#                              state='disabled', cursor='hand2')
+#         btn_goto.pack(side='left', padx=4, pady=8)
+
+#         lbl_st2 = tk.Label(bot, text='', font=('',8), bg=_bar, fg=_sel)
+#         lbl_st2.pack(side='right', padx=12)
+
+#         # ── 内部函数 ──────────────────────────────────
+#         def _show_detail(text, tag='hint'):
+#             detail.config(state='normal'); detail.delete('1.0', 'end')
+#             detail.insert('end', text, tag); detail.config(state='disabled')
+
+#         def _show_detail_rich(title, score, reason):
+#             detail.config(state='normal'); detail.delete('1.0', 'end')
+#             detail.insert('end', f'{title}\n', 'title')
+#             detail.insert('end', f'匹配度：{"★" * min(score,5)}{"☆" * max(0,5-score)}  {score}/5\n', 'score')
+#             detail.insert('end', f'\n{reason}', 'reason')
+#             detail.config(state='disabled')
+
+#         def _on_select(event=None):
+#             idxs = result_lb.curselection()
+#             if not idxs or not st.results: return
+#             _item = st.results[idxs[0]]
+#             _show_detail_rich(_item['ch_title'], _item['score'], _item['reason'])
+#             btn_goto.config(state='normal', command=lambda i=_item['ch_idx']: (dlg.destroy(), self.goto_chapter(i)))
+
+#         result_lb.bind('<<ListboxSelect>>', _on_select)
+#         result_lb.bind('<Double-Button-1>', lambda e: btn_goto.invoke() if btn_goto['state']=='normal' else None)
+
+#         def _on_find_success(results):
+#             st.running = False; st.results = results
+#             btn_find.config(state='normal', text='🔍  重新分析')
+#             result_lb.delete(0, 'end')
+#             if not results:
+#                 _show_detail('未找到匹配章节，请尝试扩大范围或换一种描述。', 'hint')
+#                 lbl_st2.config(text='未找到结果'); return
+#             for _r in results:
+#                 _stars = '★' * min(_r['score'], 5)
+#                 result_lb.insert('end', f"  第{_r['ch_idx']+1}章  {_r['ch_title'][:24]}  {_stars}")
+#             lbl_st2.config(text=f'找到 {len(results)} 个匹配')
+#             result_lb.selection_set(0); _on_select()
+
+#         def _on_find_error(msg):
+#             st.running = False
+#             btn_find.config(state='normal', text='🔍  开始分析')
+            
+#             if msg.startswith('NO_KEY_'):
+#                 _model = msg.replace('NO_KEY_', '')
+#                 _fname = 'api_key_minimax.txt' if _model == 'MiniMax' else 'api_key.txt'
+#                 _show_detail(f'⚠  未找到 {_model} 的 API Key\n请在程序同目录新建 {_fname}', 'warn')
+#             else:
+#                 _show_detail(f'⚠  分析失败\n\n{msg}', 'warn')
+#             lbl_st2.config(text='')
+
+#         def _do_find():
+#             _query = inp.get('1.0','end-1c').strip()
+#             if not _query or _query == _PH: inp.focus(); return
+#             if st.running: return
+#             st.running = True; st.results = []; result_lb.delete(0, 'end')
+#             btn_find.config(state='disabled', text='分析中…')
+#             btn_goto.config(state='disabled'); lbl_st2.config(text='')
+            
+#             _selected_range = v_range.get()
+#             _model_choice = self.var_ai_model.get()
+#             _show_detail(f'[{_model_choice}] 正在分析 [{_selected_range}]，请稍候…', 'hint')
+#             _top_n = v_cnt.get()
+
+#             # 构建 prompt 的上下文范围
+#             _toc_lines = []
+#             _start_idx, _end_idx = 0, total_ch
+            
+#             if "全书" in _selected_range:
+#                 for _i, _ch in enumerate(self.chapters):
+#                     _toc_lines.append(f"[{_i}]《{_ch['title']}》")
+#             else:
+#                 import re
+#                 m = re.search(r'第(\d+)-(\d+)章', _selected_range)
+#                 if m:
+#                     _start_idx = int(m.group(1)) - 1
+#                     _end_idx = int(m.group(2))
+#                 for _i in range(_start_idx, min(_end_idx, total_ch)):
+#                     _ch = self.chapters[_i]
+#                     _preview = _ch['body'][:50].replace('\n', ' ').strip()
+#                     _toc_lines.append(f"[{_i}]《{_ch['title']}》：{_preview}…")
+            
+#             _toc_text = '\n'.join(_toc_lines)
+
+#             def worker():
+#                 import urllib.request as _ureq
+#                 import urllib.error   as _uerr
+#                 import json           as _ujson
+
+#                 if _model_choice == 'MiniMax':
+#                     _key = _get_api_key('MiniMax')
+#                     _url = 'https://api.minimax.chat/v1/chat/completions'
+#                     _model_name = 'abab6.5s-chat'
+#                 else:
+#                     _key = _get_api_key('GLM')
+#                     _url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+#                     _model_name = 'glm-4-flash'
+
+#                 if not _key:
+#                     dlg.after(0, lambda: _on_find_error(f'NO_KEY_{_model_choice}')); return
+
+#                 _prompt = (
+#                     f"我在读一本小说，对某个章节有模糊印象，请帮我找出最匹配的章节。\n\n"
+#                     f"【我的描述】\n{_query}\n\n"
+#                     f"【候选章节列表】(格式为 [序号]《标题》：预览)\n{_toc_text}\n\n"
+#                     f"请从候选列表中选出最匹配的 {_top_n} 个，"
+#                     f"以 JSON 数组格式返回，每项包含：\n"
+#                     f"  ch_idx（必须严格使用上面列表括号[]中的数字序号，整数）\n"
+#                     f"  ch_title（章节标题）\n"
+#                     f"  score（匹配度1-5分，整数）\n"
+#                     f"  reason（50字内说明匹配原因）\n\n"
+#                     f"只返回 JSON，不要其他文字，格式示例：\n"
+#                     f'[{{"ch_idx":2,"ch_title":"第三章","score":4,"reason":"..."}}]'
+#                 )
+
+#                 _payload = _ujson.dumps({
+#                     'model':       _model_name,
+#                     'max_tokens':  600,
+#                     'temperature': 0.2,
+#                     'messages':    [{'role': 'user', 'content': _prompt}],
+#                 }).encode('utf-8')
+
+#                 _req = _ureq.Request(
+#                     _url,
+#                     data    = _payload,
+#                     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {_key}'},
+#                     method  = 'POST',
+#                 )
+#                 try:
+#                     with _ureq.urlopen(_req, timeout=40) as _resp:
+#                         _raw   = _resp.read().decode('utf-8')
+#                         _pdata = _ujson.loads(_raw)
+#                         _text  = _pdata['choices'][0]['message']['content'].strip()
+
+#                     _text = re.sub(r'^```[a-z]*\s*', '', _text, flags=re.I)
+#                     _text = re.sub(r'\s*```$', '', _text)
+#                     _parsed = _ujson.loads(_text)
+
+#                     _results = []
+#                     for _item in _parsed[:_top_n]:
+#                         _ci = int(_item.get('ch_idx', 0))
+#                         if 0 <= _ci < len(self.chapters):
+#                             _results.append({
+#                                 'rank':     len(_results)+1,
+#                                 'ch_idx':   _ci,
+#                                 'ch_title': self.chapters[_ci]['title'],
+#                                 'score':    max(1, min(5, int(_item.get('score', 3)))),
+#                                 'reason':   str(_item.get('reason', ''))[:120],
+#                             })
+#                     dlg.after(0, lambda r=_results: _on_find_success(r))
+
+#                 except _uerr.HTTPError as _he:
+#                     _hbody = _he.read().decode('utf-8', errors='replace')
+#                     try:    _hemsg = _ujson.loads(_hbody).get('error',{}).get('message', _hbody)
+#                     except: _hemsg = _hbody[:150]
+#                     dlg.after(0, lambda c=str(_he.code), m=_hemsg: _on_find_error(f'HTTP {c}：{m}'))
+#                 except Exception as _exc:
+#                     dlg.after(0, lambda m=str(_exc): _on_find_error(m))
+
+#             import threading
+#             threading.Thread(target=worker, daemon=True).start()
+
+#         btn_find.config(command=_do_find)
+#         inp.bind('<Control-Return>', lambda e: _do_find())
+
+#         _show_detail('选择【搜索范围】，输入回忆的情节，AI 将精准定位。\n💡 范围越小，API 请求越快，匹配越精准。', 'hint')
+#         _rx = self.root.winfo_x() + self.root.winfo_width() + 10
+#         _ry = self.root.winfo_y()
+#         dlg.geometry(f'500x620+{_rx}+{_ry}')
+#     # ─────────────────────────────────────────────────
+#     # 角色画像缓存机制 (App 类方法)
+#     # ─────────────────────────────────────────────────
+#     def _get_or_create_profile(self, role_name, update_ui_cb):
+#         """获取或生成角色画像，大幅降低后续对话的 Token 消耗"""
+#         safe_title = re.sub(r'[\\/*?:"<>|]', "", self.book_title)
+#         safe_role = re.sub(r'[\\/*?:"<>|]', "", role_name)
+#         profile_path = os.path.join(PROFILES_DIR, f"{safe_title}_{safe_role}.txt")
+        
+#         # 1. 命中缓存，直接读取返回
+#         if os.path.exists(profile_path):
+#             with open(profile_path, 'r', encoding='utf-8') as f:
+#                 return f.read()
+                
+#         # 2. 未命中缓存，需要提取上下文生成画像
+#         update_ui_cb(f"系统", f"正在深度分析【{role_name}】的性格与语言习惯，首次分析需要几十秒，请稍候...")
+        
+#         # 提取当前章节及前面几章的文本（防止剧透，且限制长度防越界）
+#         start_ch = max(0, self.cur_ch - 5)
+#         context = "\n".join([c['body'] for c in self.chapters[start_ch:self.cur_ch + 1]])
+#         context = context[-8000:] # 取最近的8000字作为分析材料
+        
+#         sys_prompt = (
+#             f"你是一个专业的文学角色分析师。请根据以下截取的小说内容，提取角色【{role_name}】的深度画像，包括：\n"
+#             f"1. 核心性格特征\n"
+#             f"2. 标志性的说话口癖与语气（举例说明）\n"
+#             f"3. 对其他关键人物的态度与人际关系\n"
+#             f"字数严格控制在500字以内，直接输出画像，不需要任何寒暄。"
+#         )
+        
+#         messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"小说片段：\n{context}"}]
+#         success, result = _robust_api_call(self.var_ai_model.get(), messages, max_retries=2, timeout=60)
+        
+#         if success:
+#             with open(profile_path, 'w', encoding='utf-8') as f:
+#                 f.write(result)
+#             return result
+#         else:
+#             return f"ERROR:{result}"
+
+#     # ─────────────────────────────────────────────────
+#     # 角色对话窗口 (App 类方法)
+#     # ─────────────────────────────────────────────────
+#     def open_role_chat(self):
+#         if not self.chapters:
+#             messagebox.showinfo('提示', '请先打开小说'); return
+
+#         t = self._cur_theme()
+#         bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+
+#         win = tk.Toplevel(self.root)
+#         win.title('与角色跨时空对话')
+#         win.geometry('450x600')
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+
+#         chat_history = [] # 维护多轮对话的上下文
+
+#         # ── 顶部 ──
+#         top = tk.Frame(win, bg=bar, height=40)
+#         top.pack(fill='x')
+#         tk.Label(top, text='对话角色:', font=('', 9, 'bold'), bg=bar, fg=fg).pack(side='left', padx=10)
+        
+#         role_var = tk.StringVar(value="")
+#         role_ent = tk.Entry(top, textvariable=role_var, width=12, font=('', 9), bg=bg, fg=fg, insertbackground=fg)
+#         role_ent.pack(side='left', padx=5, pady=8)
+        
+#         # ── 聊天显示区 ──
+#         chat_frame = tk.Frame(win, bg=bg)
+#         chat_frame.pack(fill='both', expand=True, padx=8, pady=8)
+        
+#         chat_display = scrolledtext.ScrolledText(
+#             chat_frame, font=(self.font_fam, self.font_size), 
+#             bg=bg, fg=fg, state='disabled', wrap='word', borderwidth=0, highlightthickness=0, spacing1=4, spacing3=4
+#         )
+#         chat_display.pack(fill='both', expand=True)
+#         chat_display.tag_config('name', font=(self.font_fam, self.font_size, 'bold'), foreground=sel)
+#         chat_display.tag_config('sys', font=(self.font_fam, self.font_size - 1, 'italic'), foreground='#888')
+
+#         # ── 底部输入区 ──
+#         bot = tk.Frame(win, bg=bar)
+#         bot.pack(fill='x', side='bottom')
+        
+#         msg_ent = tk.Entry(bot, font=(self.font_fam, self.font_size), bg=bg, fg=fg, insertbackground=fg, relief='flat')
+#         msg_ent.pack(fill='x', padx=10, pady=10, side='left', expand=True, ipady=4)
+
+#         btn_send = tk.Button(bot, text="发送", font=('', 9, 'bold'), bg=fg, fg=bg, activebackground=sel, relief='flat', cursor='hand2')
+#         btn_send.pack(side='right', padx=10, pady=10, ipadx=10)
+
+#         # ── 核心逻辑 ──
+#         def append_msg(who, text, tag='name'):
+#             chat_display.config(state='normal')
+#             if tag == 'sys':
+#                 chat_display.insert('end', f"{who}: {text}\n\n", 'sys')
+#             else:
+#                 chat_display.insert('end', f"[{who}] ", 'name')
+#                 chat_display.insert('end', f"{text}\n\n")
+#             chat_display.config(state='disabled')
+#             chat_display.see('end')
+
+#         def set_ui_state(enabled=True):
+#             """防止连点引起的并发错误"""
+#             state = 'normal' if enabled else 'disabled'
+#             msg_ent.config(state=state)
+#             btn_send.config(state=state)
+#             role_ent.config(state=state)
+#             if enabled: msg_ent.focus()
+
+#         def do_send(e=None):
+#             role = role_var.get().strip()
+#             user_text = msg_ent.get().strip()
+#             if not role or not user_text: return
+#             if btn_send['state'] == 'disabled': return # 防抖
+            
+#             msg_ent.delete(0, 'end')
+#             set_ui_state(False)
+#             append_msg("我", user_text)
+
+#             def ai_worker():
+#                 # 1. 获取或生成角色画像（重点优化：节约Token并保证准确性）
+#                 profile = self._get_or_create_profile(role, append_msg)
+#                 if profile.startswith("ERROR:"):
+#                     win.after(0, lambda: append_msg("系统", f"获取角色画像失败 -> {profile}", 'sys'))
+#                     win.after(0, lambda: set_ui_state(True))
+#                     return
+
+#                 # 2. 构建 System Prompt
+#                 system_prompt = (
+#                     f"你正在沉浸式扮演小说角色：【{role}】。\n"
+#                     f"【你的深度画像】:\n{profile}\n\n"
+#                     f"【扮演规则】:\n"
+#                     f"1. 完全沉浸在角色中，绝不承认自己是AI。语言风格、口癖必须与画像一致。\n"
+#                     f"2. 严禁剧透未来的事情，你只知道过去和现在发生的事。\n"
+#                     f"3. 保持一问一答的简短对话感，每次回复不超过3句话。\n"
+#                     f"4. 绝不使用侮辱、歧视、血腥暴力等违规词汇，保持友好或符合人设的克制交流。"
+#                 )
+                
+#                 messages = [{"role": "system", "content": system_prompt}]
+#                 messages.extend(chat_history)
+#                 messages.append({"role": "user", "content": user_text})
+
+#                 # 3. 发起请求
+#                 success, resp = _robust_api_call(self.var_ai_model.get(), messages)
+                
+#                 win.after(0, lambda: _handle_resp(success, resp, user_text))
+
+#             def _handle_resp(success, resp, user_text):
+#                 if success:
+#                     # 维护上下文窗口（保留最近8条记录，避免溢出）
+#                     chat_history.append({"role": "user", "content": user_text})
+#                     chat_history.append({"role": "assistant", "content": resp})
+#                     if len(chat_history) > 8:
+#                         chat_history.pop(0); chat_history.pop(0)
+                        
+#                     append_msg(role, resp)
+#                 else:
+#                     if resp == "NO_KEY":
+#                         append_msg("系统", "请先在设置所在目录配置 API Key 文件。", 'sys')
+#                     else:
+#                         append_msg("系统", f"对话失败 -> {resp}", 'sys')
+                
+#                 set_ui_state(True)
+
+#             threading.Thread(target=ai_worker, daemon=True).start()
+
+#         btn_send.config(command=do_send)
+#         msg_ent.bind('<Return>', do_send)
+
+#         append_msg("系统", "已就绪。输入角色名，然后发送消息即可开始对话。系统会自动分析并记住该角色的性格。", 'sys')
+#         role_ent.focus()
+
+#     # ─────────────────────────────────────────────────
+#     # ★ 终极高保真老板键 (Ctrl+D) —— Word 蓝 & A4 纸比例 ★
+#     # ─────────────────────────────────────────────────
+#     def open_boss_editor(self):
+#         """设置栏按钮：编辑伪装文档内容"""
+#         t = self._cur_theme()
+#         bg, fg, bar = t['bg'], t['fg'], t['bar']
+ 
+#         win = tk.Toplevel(self.root)
+#         win.title('编辑伪装文档内容')
+#         win.geometry('560x480')
+#         win.attributes('-topmost', True)
+#         win.configure(bg=bg)
+ 
+#         # 标题栏
+#         hdr = tk.Frame(win, bg='#2b579a', height=30)
+#         hdr.pack(fill='x'); hdr.pack_propagate(False)
+#         tk.Label(hdr, text='  📝  编辑 Word 伪装文档内容',
+#                  font=('', 9, 'bold'), bg='#2b579a', fg='white').pack(side='left', padx=6, pady=5)
+#         tk.Button(hdr, text='×', relief='flat', font=('', 11), bg='#2b579a', fg='white',
+#                   command=win.destroy).pack(side='right', padx=6)
+ 
+#         tk.Label(win, text='以下内容会显示在老板键伪装的 Word 文档中（Ctrl+D 触发）：',
+#                  font=('', 9), bg=bg, fg=fg).pack(anchor='w', padx=12, pady=(10, 4))
+ 
+#         # 文本编辑区
+#         ta = tk.Text(win, font=('Microsoft YaHei', 10) if sys.platform == 'win32' else ('', 11),
+#                      bg='white', fg='#1a1a1a',
+#                      relief='flat', padx=12, pady=10, wrap='word',
+#                      borderwidth=1, highlightthickness=1,
+#                      highlightbackground='#c8c8c8', highlightcolor='#2b579a')
+#         ta.pack(fill='both', expand=True, padx=12, pady=4)
+ 
+#         # 读取已保存内容
+#         if os.path.exists(BOSS_FILE):
+#             with open(BOSS_FILE, encoding='utf-8') as f:
+#                 ta.insert('1.0', f.read())
+#         else:
+#             ta.insert('1.0', _DEFAULT_BOSS_TEXT)
+ 
+#         # 底部按钮
+#         bf = tk.Frame(win, bg=bar); bf.pack(fill='x', padx=12, pady=8)
+#         tk.Label(bf, text='提示：标题行用"■ "开头，小标题用"▸ "开头',
+#                  font=('', 8), bg=bar, fg='#888').pack(side='left')
+ 
+#         def save_and_close():
+#             content = ta.get('1.0', 'end-1c')
+#             with open(BOSS_FILE, 'w', encoding='utf-8') as f:
+#                 f.write(content)
+#             # 如果老板模式已开启，立即刷新文档内容
+#             if self._is_boss_mode and hasattr(self, '_boss_text_widget'):
+#                 self._refresh_boss_doc(content)
+#             self._toast('📝 伪装文档已保存')
+#             win.destroy()
+ 
+#         tk.Button(bf, text='保存', font=('', 9, 'bold'),
+#                   bg='#2b579a', fg='white', relief='flat', padx=16, pady=4,
+#                   command=save_and_close).pack(side='right', padx=4)
+#         tk.Button(bf, text='取消', font=('', 9),
+#                   bg=bar, fg=fg, relief='flat', padx=12, pady=4,
+#                   command=win.destroy).pack(side='right')
+ 
+#         win.bind('<Control-Return>', lambda e: save_and_close())
+ 
+#     # ── 内部辅助：读取文档内容 ────────────────────────────────────────────────
+#     def _get_boss_content(self):
+#         if os.path.exists(BOSS_FILE):
+#             try:
+#                 with open(BOSS_FILE, encoding='utf-8') as f:
+#                     return f.read()
+#             except:
+#                 pass
+#         return _DEFAULT_BOSS_TEXT
+ 
+#     def _refresh_boss_doc(self, content=None):
+#         """把内容渲染进 A4 纸 Text widget（支持简单标记语法）"""
+#         if not hasattr(self, '_boss_text_widget'):
+#             return
+#         if content is None:
+#             content = self._get_boss_content()
+ 
+#         tw = self._boss_text_widget
+#         tw.config(state='normal')
+#         tw.delete('1.0', 'end')
+ 
+#         # 简单标记渲染
+#         for line in content.split('\n'):
+#             stripped = line.strip()
+#             if stripped.startswith('■ '):
+#                 # 一级标题（蓝色加粗）
+#                 tw.insert('end', stripped[2:] + '\n', 'h1')
+#             elif stripped.startswith('▸ '):
+#                 # 二级标题
+#                 tw.insert('end', stripped[2:] + '\n', 'h2')
+#             elif stripped.startswith('---'):
+#                 # 水平线（用空行模拟）
+#                 tw.insert('end', '\n', 'normal')
+#             else:
+#                 tw.insert('end', line + '\n', 'normal')
+ 
+#         tw.config(state='disabled')
+#         tw.yview_moveto(0.0)
+ 
+#     def _build_boss_mode_ui(self):
+#         """构建高仿 Word 界面（仅创建一次，之后复用）"""
+#         WORD_BLUE  = '#2b579a'
+#         RIBBON_BG  = '#f3f2f1'
+#         DOC_GRAY   = '#b0b0b0'
+#         BORDER_CLR = '#c8c8c8'
+ 
+#         self.boss_frame = tk.Frame(self.root, bg=DOC_GRAY)
+ 
+#         # ── 1. 标题栏 ────────────────────────────────────────────────────────
+#         title_bar = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=28)
+#         title_bar.pack(fill='x'); title_bar.pack_propagate(False)
+ 
+#         tk.Label(title_bar, text='💾  ✔  ↶  ↷',
+#                  font=('', 9), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=8)
+#         tk.Label(title_bar, text='项目可行性研究报告.docx - Word',
+#                  font=('', 9, 'bold'), bg=WORD_BLUE, fg='white').pack(side='left', expand=True)
+ 
+#         # 窗口控制按钮
+#         for sym, hov in [('─', WORD_BLUE), ('⬜', WORD_BLUE), ('✕', '#c42b1c')]:
+#             b = tk.Label(title_bar, text=sym, font=('', 10), bg=WORD_BLUE, fg='white',
+#                          width=4, cursor='hand2')
+#             b.pack(side='right')
+#             b.bind('<Enter>', lambda e, w=b, c=hov: w.config(bg=c))
+#             b.bind('<Leave>', lambda e, w=b: w.config(bg=WORD_BLUE))
+ 
+#         # ── 2. 菜单栏 ────────────────────────────────────────────────────────
+#         menu_bar = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=24)
+#         menu_bar.pack(fill='x'); menu_bar.pack_propagate(False)
+ 
+#         menus = ['文件', '开始', '插入', '设计', '布局', '引用', '邮件', '审阅', '视图', '帮助']
+#         for i, m in enumerate(menus):
+#             is_active = (i == 1)  # "开始" 高亮
+#             bg_c = 'white'        if is_active else WORD_BLUE
+#             fg_c = WORD_BLUE      if is_active else '#d0dff5'
+#             lbl = tk.Label(menu_bar, text=m, font=('', 9), bg=bg_c, fg=fg_c,
+#                            padx=10, pady=2, cursor='hand2')
+#             lbl.pack(side='left')
+#             if not is_active:
+#                 lbl.bind('<Enter>', lambda e, w=lbl: w.config(bg='#3f6bb5', fg='white'))
+#                 lbl.bind('<Leave>', lambda e, w=lbl: w.config(bg=WORD_BLUE, fg='#d0dff5'))
+ 
+#         # ── 3. Ribbon ─────────────────────────────────────────────────────────
+#         ribbon = tk.Frame(self.boss_frame, bg='white',
+#                           highlightbackground=BORDER_CLR, highlightthickness=1)
+#         ribbon.pack(fill='x')
+ 
+#         ribbon_inner = tk.Frame(ribbon, bg='white')
+#         ribbon_inner.pack(fill='x', padx=4, pady=0)
+ 
+#         def _sep():
+#             tk.Frame(ribbon_inner, width=1, bg=BORDER_CLR).pack(
+#                 side='left', fill='y', pady=4, padx=2)
+ 
+#         def _rg_label(parent, text):
+#             tk.Label(parent, text=text, font=('', 8), fg='#666', bg='white').pack(side='bottom', pady=1)
+ 
+#         def _rb(parent, icon, label, large=False):
+#             f = tk.Frame(parent, bg='white', cursor='hand2')
+#             f.pack(side='left', padx=1, pady=2)
+#             sz = 18 if large else 13
+#             tk.Label(f, text=icon, font=('', sz), bg='white').pack()
+#             tk.Label(f, text=label, font=('', 8), fg='#333', bg='white').pack()
+#             f.bind('<Enter>', lambda e: f.config(bg='#e9ecf3'))
+#             f.bind('<Leave>', lambda e: f.config(bg='white'))
+#             for w in f.winfo_children():
+#                 w.bind('<Enter>', lambda e, fw=f: fw.config(bg='#e9ecf3'))
+#                 w.bind('<Leave>', lambda e, fw=f: fw.config(bg='white'))
+ 
+#         # 剪贴板组
+#         g1 = tk.Frame(ribbon_inner, bg='white'); g1.pack(side='left', fill='y', padx=2)
+#         g1c = tk.Frame(g1, bg='white'); g1c.pack(fill='both', expand=True)
+#         _rb(g1c, '📋', '粘贴', large=True)
+#         g1r = tk.Frame(g1c, bg='white'); g1r.pack(side='left')
+#         for ic, lb in [('✂', '剪切'), ('⧉', '复制'), ('🖊', '格式刷')]:
+#             f2 = tk.Frame(g1r, bg='white', cursor='hand2'); f2.pack(anchor='w')
+#             tk.Label(f2, text=ic, font=('', 11), bg='white').pack(side='left', padx=2)
+#             tk.Label(f2, text=lb, font=('', 8), bg='white', fg='#333').pack(side='left')
+#             f2.bind('<Enter>', lambda e, fw=f2: fw.config(bg='#e9ecf3'))
+#             f2.bind('<Leave>', lambda e, fw=f2: fw.config(bg='white'))
+#         _rg_label(g1, '剪贴板')
+#         _sep()
+ 
+#         # 字体组
+#         g2 = tk.Frame(ribbon_inner, bg='white'); g2.pack(side='left', fill='y', padx=2)
+#         font_nm = 'Microsoft YaHei' if sys.platform == 'win32' else 'Arial'
+#         row1 = tk.Frame(g2, bg='white'); row1.pack(anchor='w', pady=1)
+#         tk.Label(row1, text='等线 (中文正文)  ▾', font=('', 9), bg='white',
+#                  relief='groove', bd=1, padx=4, width=16).pack(side='left')
+#         tk.Label(row1, text='11 ▾', font=('', 9), bg='white',
+#                  relief='groove', bd=1, padx=4, width=4).pack(side='left', padx=2)
+#         tk.Label(row1, text='A↑ A↓', font=('', 9), bg='white').pack(side='left', padx=2)
+#         row2 = tk.Frame(g2, bg='white'); row2.pack(anchor='w', pady=1)
+#         for txt, kw in [('B', {'font':('',11,'bold')}), ('I', {'font':('',11,'italic')}),
+#                         ('U̲', {'font':('',11)}), ('ab̶', {'font':('',9)}),
+#                         ('A', {'font':('',11)}), ('A', {'font':('',11), 'fg':'#c00'})]:
+#             tk.Label(row2, text=txt, bg='white', relief='flat', padx=3,
+#                      cursor='hand2', **kw).pack(side='left')
+#         _rg_label(g2, '字体')
+#         _sep()
+ 
+#         # 段落组
+#         g3 = tk.Frame(ribbon_inner, bg='white'); g3.pack(side='left', fill='y', padx=2)
+#         r3a = tk.Frame(g3, bg='white'); r3a.pack(anchor='w', pady=1)
+#         for t in ['≡▾', '½≡▾', '|', '☰', '≡', '☲', '☳']:
+#             tk.Label(r3a, text=t, font=('', 10), bg='white', padx=2).pack(side='left')
+#         r3b = tk.Frame(g3, bg='white'); r3b.pack(anchor='w', pady=1)
+#         for t in ['⬛', '↕', '↵', '¶']:
+#             tk.Label(r3b, text=t, font=('', 10), bg='white', padx=2).pack(side='left')
+#         _rg_label(g3, '段落')
+#         _sep()
+ 
+#         # 样式组
+#         g4 = tk.Frame(ribbon_inner, bg='white'); g4.pack(side='left', fill='y', padx=2)
+#         styles_f = tk.Frame(g4, bg='white'); styles_f.pack(fill='both', expand=True, pady=2)
+#         style_defs = [
+#             ('正文',  '#000', '#f0f4fb', True),
+#             ('标题 1', WORD_BLUE, 'white', False),
+#             ('标题 2', WORD_BLUE, 'white', False),
+#         ]
+#         for s_lbl, s_fg, s_bg, s_active in style_defs:
+#             sf = tk.Frame(styles_f, bg=s_bg,
+#                           highlightbackground=BORDER_CLR if s_active else 'white',
+#                           highlightthickness=1, cursor='hand2', width=50)
+#             sf.pack(side='left', padx=1)
+#             tk.Label(sf, text='AaBbCc', font=('Times New Roman', 9),
+#                      fg=s_fg, bg=s_bg, padx=4, pady=1).pack()
+#             tk.Label(sf, text=s_lbl, font=('', 8), fg=s_fg, bg=s_bg, padx=4).pack()
+#         _rg_label(g4, '样式')
+#         _sep()
+ 
+#         # 编辑组
+#         g5 = tk.Frame(ribbon_inner, bg='white'); g5.pack(side='left', fill='y', padx=2)
+#         for ic, lb in [('🔍', '查找 ▾'), ('⇄', '替换'), ('↖', '选择 ▾')]:
+#             f5 = tk.Frame(g5, bg='white', cursor='hand2'); f5.pack(anchor='w', pady=1)
+#             tk.Label(f5, text=ic, font=('', 11), bg='white').pack(side='left', padx=2)
+#             tk.Label(f5, text=lb, font=('', 9), bg='white', fg='#333').pack(side='left')
+#         _rg_label(g5, '编辑')
+ 
+#         # Ribbon 底部提示（Ctrl+D 退出）
+#         hint = tk.Frame(self.boss_frame, bg=RIBBON_BG, height=14)
+#         hint.pack(fill='x'); hint.pack_propagate(False)
+#         tk.Label(hint, text='按 Ctrl+D 恢复阅读', font=('', 8), bg=RIBBON_BG, fg='#999').pack(side='right', padx=8)
+ 
+#         # ── 4. 标尺 ────────────────────────────────────────────────────────────
+#         ruler = tk.Canvas(self.boss_frame, height=16, bg='#f0eeeb',
+#                           highlightthickness=0)
+#         ruler.pack(fill='x')
+#         # 绘制简单标尺刻度
+#         self.boss_frame.after(50, lambda: self._draw_ruler(ruler))
+ 
+#         # ── 5. 文档主区域（A4 纸）─────────────────────────────────────────────
+#         doc_outer = tk.Frame(self.boss_frame, bg=DOC_GRAY)
+#         doc_outer.pack(fill='both', expand=True)
+ 
+#         # 右侧滚动条
+#         doc_vsb = tk.Scrollbar(doc_outer, orient='vertical', width=14)
+#         doc_vsb.pack(side='right', fill='y')
+ 
+#         doc_canvas = tk.Canvas(doc_outer, bg=DOC_GRAY,
+#                                highlightthickness=0,
+#                                yscrollcommand=doc_vsb.set)
+#         doc_canvas.pack(side='left', fill='both', expand=True)
+#         doc_vsb.config(command=doc_canvas.yview)
+ 
+#         # A4 纸 Frame（白色，固定宽度居中）
+#         a4_outer = tk.Frame(doc_canvas, bg=DOC_GRAY)
+#         doc_canvas.create_window((0, 0), window=a4_outer, anchor='nw')
+ 
+#         # 纸张容器（阴影感用边框模拟）
+#         a4_shadow = tk.Frame(a4_outer, bg='#888', padx=2, pady=2)
+#         a4_shadow.pack(pady=20)
+ 
+#         a4 = tk.Frame(a4_shadow, bg='white', width=680)
+#         a4.pack()
+#         a4.pack_propagate(False)
+ 
+#         # A4 内容 Text widget
+#         doc_font = ('Times New Roman', 11) if sys.platform != 'linux' else ('', 11)
+#         tw = tk.Text(a4, font=doc_font,
+#                      bg='white', fg='#1a1a1a',
+#                      relief='flat', padx=80, pady=72,
+#                      wrap='word', state='disabled',
+#                      borderwidth=0, highlightthickness=0,
+#                      spacing1=4, spacing2=2, spacing3=6,
+#                      cursor='arrow')
+#         tw.pack(fill='both', expand=True)
+ 
+#         # 文字样式标签
+#         h1_font = ('Times New Roman', 16, 'bold') if sys.platform != 'linux' else ('', 16, 'bold')
+#         h2_font = ('Times New Roman', 13, 'bold') if sys.platform != 'linux' else ('', 13, 'bold')
+#         tw.tag_config('h1',     font=h1_font, foreground=WORD_BLUE,
+#                       spacing1=14, spacing3=6)
+#         tw.tag_config('h2',     font=h2_font, foreground=WORD_BLUE,
+#                       spacing1=10, spacing3=4)
+#         tw.tag_config('normal', font=doc_font, foreground='#1a1a1a',
+#                       lmargin1=0, lmargin2=0, spacing1=2, spacing3=2)
+ 
+#         self._boss_text_widget = tw
+#         self._boss_doc_canvas  = doc_canvas
+#         self._boss_a4_outer    = a4_outer
+ 
+#         # 滚轮绑定
+#         def _boss_scroll(e):
+#             delta = -1 if (e.delta > 0 or e.num == 4) else 1
+#             doc_canvas.yview_scroll(delta * 3, 'units')
+#         doc_canvas.bind('<MouseWheel>', _boss_scroll)
+#         doc_canvas.bind('<Button-4>',   _boss_scroll)
+#         doc_canvas.bind('<Button-5>',   _boss_scroll)
+#         tw.bind('<MouseWheel>', _boss_scroll)
+ 
+#         # Canvas 自适应大小
+#         def _on_configure(e):
+#             doc_canvas.configure(scrollregion=doc_canvas.bbox('all'))
+#             # 水平居中 A4 纸
+#             cw = doc_canvas.winfo_width()
+#             aw = a4_outer.winfo_reqwidth()
+#             x  = max(0, (cw - aw) // 2)
+#             doc_canvas.coords(doc_canvas.find_all()[0], x, 0)
+#         a4_outer.bind('<Configure>', _on_configure)
+ 
+#         # ── 6. 状态栏 ────────────────────────────────────────────────────────
+#         status = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=22)
+#         status.pack(fill='x', side='bottom'); status.pack_propagate(False)
+ 
+#         tk.Label(status, text='第 1 页，共 5 页  |  2,847 个字  |  中文(中国)',
+#                  font=('', 8), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=10)
+#         # 右侧视图按钮 + 缩放
+#         right_f = tk.Frame(status, bg=WORD_BLUE); right_f.pack(side='right', padx=8)
+#         for sym, active in [('📄', True), ('🌐', False), ('📖', False)]:
+#             c = 'white' if active else '#c7d8f0'
+#             tk.Label(right_f, text=sym, font=('', 9), bg=WORD_BLUE, fg=c,
+#                      cursor='hand2').pack(side='left', padx=2)
+#         tk.Label(right_f, text='  ─────  100%',
+#                  font=('', 8), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=4)
+ 
+#     def _draw_ruler(self, canvas):
+#         """绘制 Word 风格标尺"""
+#         try:
+#             canvas.update_idletasks()
+#             W = canvas.winfo_width()
+#             H = 16
+#             canvas.delete('all')
+#             canvas.create_rectangle(0, 0, W, H, fill='#f0eeeb', outline='')
+#             # 灰色文档区（页边距外）
+#             margin_px = max(0, (W - 520) // 2)
+#             canvas.create_rectangle(0, 0, margin_px, H, fill='#d0cec9', outline='')
+#             canvas.create_rectangle(W - margin_px, 0, W, H, fill='#d0cec9', outline='')
+#             # 刻度线
+#             for i in range(0, 26):
+#                 x = margin_px + i * 20
+#                 if x > W - margin_px: break
+#                 h_tick = 8 if i % 5 == 0 else 4
+#                 canvas.create_line(x, H - h_tick, x, H, fill='#888', width=1)
+#                 if i % 5 == 0 and i > 0:
+#                     canvas.create_text(x, 3, text=str(i), font=('', 7), fill='#666', anchor='n')
+#         except:
+#             pass
+ 
+#     def toggle_boss_mode(self, event=None):
+#         """Ctrl+D：在阅读模式 ↔ Word 伪装模式之间切换"""
+#         if not hasattr(self, 'boss_frame'):
+#             self._build_boss_mode_ui()
+ 
+#         self._is_boss_mode = not self._is_boss_mode
+ 
+#         if self._is_boss_mode:
+#             # ── 切入老板模式 ─────────────────────────────────────────────────
+#             self._real_title    = self.root.title()
+#             self._real_geometry = self.root.geometry()
+#             self._real_alpha    = self.root.attributes('-alpha')
+ 
+#             # 隐藏阅读界面
+#             for w in (self.topbar, self.setbar, self.sep,
+#                       self.txt_frame, self.bot_area):
+#                 w.pack_forget()
+ 
+#             # 停止 TTS（声音会暴露）
+#             if self._tts_playing:
+#                 self.tts.stop()
+#                 self._tts_playing = False
+#                 self.btn_tts.config(text='🔊')
+ 
+#             # 恢复完全不透明
+#             self.root.attributes('-alpha', 1.0)
+ 
+#             # 刷新文档内容
+#             self._refresh_boss_doc()
+ 
+#             # 根据屏幕大小调整窗口（模拟 Word 默认大小）
+#             sw = self.root.winfo_screenwidth()
+#             sh = self.root.winfo_screenheight()
+#             w  = min(1100, sw - 60)
+#             h  = min(860,  sh - 60)
+#             x  = (sw - w) // 2
+#             y  = max(0, (sh - h) // 2 - 20)
+#             self.root.geometry(f'{w}x{h}+{x}+{y}')
+#             self.root.title('项目可行性研究报告.docx - Word')
+#             self.root.configure(bg='#b0b0b0')
+ 
+#             # 显示 Word 界面
+#             self.boss_frame.pack(fill='both', expand=True)
+ 
+#             # 重绘标尺（窗口宽度变了）
+#             self.root.after(100, lambda: self._draw_ruler(
+#                 [w for w in self.boss_frame.winfo_children()
+#                  if isinstance(w, tk.Canvas)][0]
+#                 if any(isinstance(w, tk.Canvas)
+#                        for w in self.boss_frame.winfo_children()) else None
+#             ))
+ 
+#         else:
+#             # ── 退出老板模式 ─────────────────────────────────────────────────
+#             self.boss_frame.pack_forget()
+ 
+#             # 恢复窗口属性
+#             self.root.geometry(self._real_geometry)
+#             self.root.title(self._real_title)
+#             self.root.attributes('-alpha', self._real_alpha)
+ 
+#             # 恢复阅读界面
+#             self._apply_theme()   # 先刷新颜色
+ 
+#             self.topbar.pack(fill='x')
+#             if self._settings_open:
+#                 self.setbar.pack(fill='x', after=self.topbar)
+#             self.sep.pack(fill='x')
+#             self.txt_frame.pack(fill='both', expand=True)
+#             self.bot_area.pack(fill='x', side='bottom')
+ 
+#             # 恢复焦点
+#             self.root.focus_set()
+
+#     # ─────────────────────────────────────────────────
+#     # 关闭与快捷键
+#     # ─────────────────────────────────────────────────
+#     def _on_close(self):
+#         self.tts.stop()
+#         self._shelf_update()
+#         self.root.destroy()
+
+#     def _bind_keys(self):
+#         r=self.root
+#         r.bind('<KeyPress-s>',   lambda e: self._scroll_down())
+#         r.bind('<KeyPress-S>',   lambda e: self._scroll_down())
+#         r.bind('<Right>',        lambda e: self.next_chapter())
+#         r.bind('<Left>',         lambda e: self.prev_chapter())
+#         r.bind('<Down>',         lambda e: self._scroll_down())
+#         r.bind('<Up>',           lambda e: self.txt.yview_scroll(-3,'units'))
+#         r.bind('<KeyPress-o>',   lambda e: self.add_mark())
+#         r.bind('<KeyPress-O>',   lambda e: self.add_mark())
+#         r.bind('<KeyPress-n>',   lambda e: self.add_note())
+#         r.bind('<KeyPress-N>',   lambda e: self.add_note())
+#         r.bind('<F5>',           lambda e: self.toggle_tts())
+#         r.bind('<Control-f>',    lambda e: self.open_search())
+#         r.bind('<Control-F>',    lambda e: self.open_search())
+#         r.bind('<Control-m>',    lambda e: self.open_summary())
+#         r.bind('<Control-M>',    lambda e: self.open_summary())
+#         r.bind('<Control-g>',    lambda e: self.open_chapter_finder())
+#         r.bind('<Control-G>',    lambda e: self.open_chapter_finder())
+#         r.bind('<Control-d>',    self.toggle_boss_mode) # ★ 唤醒 Word 老板键 ★
+#         r.bind('<Control-D>',    self.toggle_boss_mode)
+#         r.bind('<KeyPress-d>',   self._dp)
+#         r.bind('<KeyPress-D>',   self._dp)
+#         r.bind('<KeyRelease-d>', self._dr)
+#         r.bind('<KeyRelease-D>', self._dr)
+#         r.bind('<KeyPress-e>',   self._ep)
+#         r.bind('<KeyPress-E>',   self._ep)
+#         r.focus_set()
+
+#     def _dp(self,e): self._d_held=True
+#     def _dr(self,e): self._d_held=False
+#     def _ep(self,e):
+#         if self._d_held: self.toggle_minimize()
+
+
+# # ══════════════════════════════════════════════════════════════
+# if __name__ == '__main__':
+#     try:
+#         from ctypes import windll
+#         windll.shcore.SetProcessDpiAwareness(1)
+#     except: pass
+#     App()
+
+
 """
-摸鱼阅读器 v8.0  —  全功能版
-功能：
-  阅读体验：章节滚动、翻页、字号/行距/字色/背景/护眼模式、透明度、屏幕取色
-  书架管理：添加/删除/重命名书籍、显示封面/进度/上次阅读时间
-  阅读进度：自动记录、书架显示进度条
-  笔记系统：N键在当前章节创建笔记、查看/编辑/删除笔记
-  书签系统：O键快速书签、书签列表跳转删除
-  听书TTS ：F5启动/停止，支持语速调整（需系统 pyttsx3 或 espeak）
-  竖向拖拽滚动条、目录跳转、搜索
+摸鱼阅读器 v9.0  —  四项核心优化版
+优化：
+  [问题1-方案B] 角色分析：本地关键词索引，全文扫描角色相关段落再送AI，准确度大幅提升
+  [问题2-方案A] 文章分析：5维度结构化Prompt（主题/人物弧/伏笔/高潮/金句），深度解析
+  [问题3-方案A] 找章节：两阶段检索，本地TF-IDF粗筛→AI精排，准确率大幅提升
+  [问题4-方案A] 界面：精致扁平风，圆角卡片，分组图标按钮，章节进度渐变条
 
 运行：python novel_reader.py
 依赖：pip install pyttsx3   （TTS，可选）
@@ -12052,8 +14639,9 @@
 
 import tkinter as tk
 from tkinter import ttk, filedialog, colorchooser, messagebox, scrolledtext
-import os, re, zipfile, sys, json, copy, threading, time, datetime
+import os, re, zipfile, sys, json, copy, threading, time, datetime, math
 from html.parser import HTMLParser
+from collections import Counter
 
 
 # ══════════════════════════════════════════════════════════════
@@ -12141,6 +14729,119 @@ def split_chapters(text):
 
 
 # ══════════════════════════════════════════════════════════════
+# ★ 问题3-方案A：本地 TF-IDF 粗筛工具函数 ★
+# ══════════════════════════════════════════════════════════════
+def _tokenize_zh(text):
+    """简单中文分词：按字符ngram + 提取连续汉字词组"""
+    # 提取2-4字汉字词组
+    tokens = []
+    words = re.findall(r'[\u4e00-\u9fff]{2,6}', text)
+    tokens.extend(words)
+    # 提取英文单词
+    tokens.extend(re.findall(r'[a-zA-Z]{2,}', text.lower()))
+    return tokens
+
+def tfidf_rank_chapters(query, chapters, top_n=20):
+    """
+    本地TF-IDF粗筛：
+    1. 对query分词，得到查询词列表
+    2. 统计每章包含查询词的TF分数
+    3. 按相关性返回top_n个章节索引
+    """
+    q_tokens = set(_tokenize_zh(query))
+    if not q_tokens:
+        # fallback: 简单关键词匹配
+        scores = []
+        for i, ch in enumerate(chapters):
+            score = sum(ch['body'].count(w) for w in query.split() if w)
+            scores.append((i, score))
+        scores.sort(key=lambda x: -x[1])
+        return [i for i, _ in scores[:top_n]]
+
+    # 计算IDF：含有该词的章节数
+    doc_freq = Counter()
+    total_docs = len(chapters)
+    for ch in chapters:
+        ch_tokens = set(_tokenize_zh(ch['body'] + ch['title']))
+        for tok in q_tokens:
+            if tok in ch_tokens:
+                doc_freq[tok] += 1
+
+    scores = []
+    for i, ch in enumerate(chapters):
+        text = ch['title'] + '\n' + ch['body']
+        ch_tokens = _tokenize_zh(text)
+        ch_total = max(1, len(ch_tokens))
+        ch_counter = Counter(ch_tokens)
+
+        score = 0.0
+        for tok in q_tokens:
+            tf = ch_counter.get(tok, 0) / ch_total
+            df = doc_freq.get(tok, 0)
+            idf = math.log((total_docs + 1) / (df + 1)) + 1
+            # 标题命中加权
+            title_bonus = 3.0 if tok in ch['title'] else 1.0
+            score += tf * idf * title_bonus
+
+        scores.append((i, score))
+
+    scores.sort(key=lambda x: -x[1])
+    # 过滤分数为0的
+    valid = [(i, s) for i, s in scores if s > 0]
+    if not valid:
+        # 完全没命中时退化为返回均匀分布的章节
+        step = max(1, total_docs // top_n)
+        return list(range(0, total_docs, step))[:top_n]
+    return [i for i, _ in valid[:top_n]]
+
+
+# ══════════════════════════════════════════════════════════════
+# ★ 问题1-方案B：角色关键词索引提取 ★
+# ══════════════════════════════════════════════════════════════
+def extract_role_context(role_name, chapters, cur_ch_idx, max_chars=8000):
+    """
+    全文扫描含有角色名的段落，按位置权重合并，最多返回 max_chars 字。
+    近处章节权重更高（近因效应），保证质量。
+    """
+    segments = []  # [(chapter_idx, paragraph, weight)]
+
+    for ch_idx, ch in enumerate(chapters):
+        # 距离当前章节越近权重越高
+        dist = abs(ch_idx - cur_ch_idx)
+        weight = 1.0 / (1.0 + dist * 0.1)
+
+        paragraphs = [p.strip() for p in ch['body'].split('\n') if p.strip()]
+        for para in paragraphs:
+            if role_name in para:
+                # 对话段（含引号）额外加权
+                has_dialog = bool(re.search(r'[""「」『』]', para))
+                w = weight * (1.5 if has_dialog else 1.0)
+                segments.append((ch_idx, para, w))
+
+    if not segments:
+        # 降级：取当前章及前后各3章的全文
+        start = max(0, cur_ch_idx - 3)
+        end   = min(len(chapters), cur_ch_idx + 4)
+        fallback = '\n'.join(ch['body'] for ch in chapters[start:end])
+        return fallback[:max_chars]
+
+    # 按权重降序，截取到 max_chars
+    segments.sort(key=lambda x: -x[2])
+    result_parts = []
+    total = 0
+    seen = set()
+    for ch_idx, para, w in segments:
+        key = para[:30]  # 去重
+        if key in seen: continue
+        seen.add(key)
+        if total + len(para) > max_chars: break
+        result_parts.append(f"[第{ch_idx+1}章] {para}")
+        total += len(para)
+
+    return '\n'.join(result_parts)
+
+
+# ══════════════════════════════════════════════════════════════
 # 数据存储
 # ══════════════════════════════════════════════════════════════
 DATA_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.moyu_data')
@@ -12148,10 +14849,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 SHELF_FILE = os.path.join(DATA_DIR, 'shelf.json')
 NOTES_FILE = os.path.join(DATA_DIR, 'notes.json')
 MARKS_FILE = os.path.join(DATA_DIR, 'marks.json')
-BOSS_FILE  = os.path.join(DATA_DIR, 'boss_text.txt')  # <== 新增这一行：伪装文档的保存路径
-# 数据存储 (在原有基础上增加)
+BOSS_FILE  = os.path.join(DATA_DIR, 'boss_text.txt')
 PROFILES_DIR = os.path.join(DATA_DIR, 'profiles')
 os.makedirs(PROFILES_DIR, exist_ok=True)
+
 def _jload(f):
     try:
         with open(f, encoding='utf-8') as fp: return json.load(fp)
@@ -12190,107 +14891,73 @@ _DEFAULT_BOSS_TEXT = """\
 ▸ 五、结论与建议
  
 综合以上分析，本项目在经济性、技术可行性及战略契合度方面均达到立项标准，建议提交董事会审议，并在本季度内完成项目筹备委员会组建工作。
-"""   
-
-def _inject_api_key():
-    """
-    从程序目录的 api_key.txt 自动读取智谱 API Key。
-    用户把 Key 粘贴进 api_key.txt 即可，无需手动配置环境变量。
-    返回 key 字符串，失败返回空字符串。
-    """
-    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_key.txt')
-    if os.path.exists(key_file):
-        try:
-            key = open(key_file, encoding='utf-8').read().strip()
-            if key:
-                os.environ['ZHIPU_API_KEY'] = key
-                return key
-        except: pass
-    return os.environ.get('ZHIPU_API_KEY', '')
+"""
 
 def _get_api_key(model_type):
-    """
-    根据选择的模型类型读取对应的 API Key
-    GLM 使用 api_key.txt
-    MiniMax 使用 api_key_minimax.txt
-    """
     filename = 'api_key_minimax.txt' if model_type == 'MiniMax' else 'api_key.txt'
-    env_var = 'MINIMAX_API_KEY' if model_type == 'MiniMax' else 'ZHIPU_API_KEY'
+    env_var  = 'MINIMAX_API_KEY'    if model_type == 'MiniMax' else 'ZHIPU_API_KEY'
     key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-    
     if os.path.exists(key_file):
         try:
             key = open(key_file, encoding='utf-8').read().strip()
             if key: return key
         except: pass
     return os.environ.get(env_var, '')
-# ══════════════════════════════════════════════════════════════
-# 健壮的 API 调用 (支持指数退避重试)
-# ══════════════════════════════════════════════════════════════
+
 def _robust_api_call(model_type, messages, max_retries=3, timeout=40):
-    import time
     import urllib.request as _ureq
-    import urllib.error as _uerr
-    import json as _ujson
-    
+    import urllib.error   as _uerr
+    import json           as _ujson
+
     key = _get_api_key(model_type)
     if not key: return False, "NO_KEY"
-    
-    url = 'https://api.minimax.chat/v1/chat/completions' if model_type == 'MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+
+    url        = 'https://api.minimax.chat/v1/chat/completions' if model_type == 'MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
     model_name = 'abab6.5s-chat' if model_type == 'MiniMax' else 'glm-4-flash'
-    
+
     payload = _ujson.dumps({
         "model": model_name,
         "messages": messages,
         "temperature": 0.6
     }).encode('utf-8')
-    
-    req = _ureq.Request(url, data=payload, headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'}, method='POST')
-    
+
+    req = _ureq.Request(url, data=payload,
+                        headers={'Content-Type': 'application/json',
+                                 'Authorization': f'Bearer {key}'},
+                        method='POST')
+
     for attempt in range(max_retries):
         try:
             with _ureq.urlopen(req, timeout=timeout) as resp:
                 data = _ujson.loads(resp.read().decode('utf-8'))
                 return True, data['choices'][0]['message']['content']
         except _uerr.HTTPError as e:
-            if e.code == 429: # 触发速率限制 (Too Many Requests)
-                wait_time = (attempt + 1) * 3 # 阶梯延迟: 3s, 6s, 9s
-                time.sleep(wait_time)
-                continue
+            if e.code == 429:
+                time.sleep((attempt + 1) * 3); continue
             else:
                 err_msg = e.read().decode('utf-8', errors='replace')
                 return False, f"HTTP {e.code}: {err_msg[:100]}"
         except Exception as e:
-            # 捕获网络抖动或超时
             time.sleep(2)
             if attempt == max_retries - 1:
                 return False, f"网络错误: {str(e)}"
-            continue
-            
-    return False, "请求太频繁或网络持续拥堵，已超过最大重试次数"
+    return False, "超过最大重试次数"
+
 
 # ══════════════════════════════════════════════════════════════
-# TTS 引擎（可选）
+# TTS
 # ══════════════════════════════════════════════════════════════
 class TTS:
     def __init__(self):
-        self._engine = None
-        self._thread = None
-        self._stop   = threading.Event()
-        self._text   = ''
-        self._rate   = 180
-        self._avail  = False
-        # self._tts_playing   = False
-        # self._is_boss_mode  = False  # 新增：老板键状态
+        self._engine = None; self._thread = None
+        self._stop   = threading.Event(); self._rate = 180; self._avail = False
         self._init()
 
     def _init(self):
         try:
             import pyttsx3
-            self._engine = pyttsx3.init()
-            self._avail  = True
-        except:
-            self._avail = False
+            self._engine = pyttsx3.init(); self._avail = True
+        except: self._avail = False
 
     @property
     def available(self): return self._avail
@@ -12303,25 +14970,17 @@ class TTS:
 
     def speak(self, text, on_done=None):
         if not self._avail: return
-        self.stop()
-        self._stop.clear()
-        self._text = text
-
+        self.stop(); self._stop.clear(); self._text = text
         def run():
             try:
                 import pyttsx3
-                eng = pyttsx3.init()
-                eng.setProperty('rate', self._rate)
-                # 逐段朗读，支持中途停止
-                paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-                for para in paragraphs:
+                eng = pyttsx3.init(); eng.setProperty('rate', self._rate)
+                for para in [p.strip() for p in text.split('\n') if p.strip()]:
                     if self._stop.is_set(): break
-                    eng.say(para)
-                    eng.runAndWait()
+                    eng.say(para); eng.runAndWait()
                 eng.stop()
             except: pass
             if on_done: on_done()
-
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
 
@@ -12393,7 +15052,7 @@ def screen_color_picker(callback):
 # 自定义竖向滚动条
 # ══════════════════════════════════════════════════════════════
 class SmoothScrollbar:
-    W = 10
+    W = 8
     def __init__(self, parent, on_scroll):
         self.on_scroll = on_scroll
         self._lo,self._hi = 0.0,1.0
@@ -12417,13 +15076,11 @@ class SmoothScrollbar:
     def _draw(self):
         cv=self.cv; W=self.W; H=cv.winfo_height()
         if H<4: return
-        cv.delete('all'); PAD=2
+        cv.delete('all'); PAD=3
         cv.create_rectangle(0,0,W,H,fill=self.c_bg,outline='')
-        tx=W//2
-        cv.create_line(tx,PAD,tx,H-PAD,fill=self.c_track,width=W-4,capstyle='round')
-        th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+        th=max(24,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
         ty2=min(H-PAD,ty+th); color=self.c_hover if self._hovered else self.c_thumb
-        r=(W-4)//2; x1,x2=2,W-2; y1,y2=ty,ty2
+        r=W//2-1; x1,x2=1,W-1; y1,y2=ty,ty2
         if y2-y1>=2*r:
             cv.create_rectangle(x1,y1+r,x2,y2-r,fill=color,outline='')
             cv.create_oval(x1,y1,x2,y1+2*r,fill=color,outline='')
@@ -12433,12 +15090,12 @@ class SmoothScrollbar:
     def _hover(self, v): self._hovered=v; self._draw()
 
     def _y_to_frac(self,y):
-        H=self.cv.winfo_height(); PAD=2
+        H=self.cv.winfo_height(); PAD=3
         return max(0.0,min(1.0,(y-PAD)/max(1,H-2*PAD)))
 
     def _thumb_range(self):
-        H=self.cv.winfo_height(); PAD=2
-        th=max(20,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
+        H=self.cv.winfo_height(); PAD=3
+        th=max(24,int((self._hi-self._lo)*(H-2*PAD))); ty=PAD+int(self._lo*(H-2*PAD))
         return ty,ty+th
 
     def _press(self, e):
@@ -12451,7 +15108,7 @@ class SmoothScrollbar:
 
     def _drag(self, e):
         if not self._dragging: return
-        H=self.cv.winfo_height(); PAD=2; dy=e.y-self._drag_start_y
+        H=self.cv.winfo_height(); PAD=3; dy=e.y-self._drag_start_y
         delta=dy/max(1,H-2*PAD); span=self._hi-self._lo
         target=max(0.0,min(1.0-span,self._drag_start_lo+delta))
         self._lo=target; self._hi=target+span; self._draw(); self.on_scroll(target)
@@ -12460,36 +15117,92 @@ class SmoothScrollbar:
 
 
 # ══════════════════════════════════════════════════════════════
+# ★ 问题4-方案A：精致扁平风 UI 工具函数 ★
+# ══════════════════════════════════════════════════════════════
+def _make_icon_btn(parent, icon, label, cmd, bg, fg, hover_bg, font_size=9):
+    """圆角卡片式图标按钮：图标在上，文字在下"""
+    frame = tk.Frame(parent, bg=bg, cursor='hand2', padx=3, pady=2)
+    lbl_icon = tk.Label(frame, text=icon, font=('', font_size+1), bg=bg, fg=fg)
+    lbl_icon.pack()
+    lbl_text = tk.Label(frame, text=label, font=('', 7), bg=bg, fg=fg)
+    lbl_text.pack()
+
+    def on_enter(e):
+        frame.config(bg=hover_bg)
+        for w in frame.winfo_children(): w.config(bg=hover_bg)
+    def on_leave(e):
+        frame.config(bg=bg)
+        for w in frame.winfo_children(): w.config(bg=bg)
+    def on_click(e): cmd()
+
+    for w in [frame, lbl_icon, lbl_text]:
+        w.bind('<Enter>', on_enter)
+        w.bind('<Leave>', on_leave)
+        w.bind('<Button-1>', on_click)
+    return frame
+
+def _make_flat_btn(parent, text, cmd, bg, fg, hover_bg=None, bold=False, padx=8, pady=3):
+    """简洁扁平按钮"""
+    if hover_bg is None: hover_bg = fg + '22' if len(fg)==7 else '#cccccc'
+    font = ('', 9, 'bold') if bold else ('', 9)
+    btn = tk.Label(parent, text=text, font=font, bg=bg, fg=fg,
+                   padx=padx, pady=pady, cursor='hand2')
+    btn.bind('<Enter>', lambda e: btn.config(bg=hover_bg))
+    btn.bind('<Leave>', lambda e: btn.config(bg=bg))
+    btn.bind('<Button-1>', lambda e: cmd())
+    return btn
+
+def _draw_progress_bar(canvas, pct, bg_color, fill_color, accent_color, width, height=4):
+    """渐变进度条（用两段颜色模拟渐变）"""
+    canvas.delete('all')
+    canvas.config(bg=bg_color)
+    r = height // 2
+    # 背景轨道
+    canvas.create_rectangle(0, 0, width, height, fill=bg_color, outline='')
+    # 填充段
+    fill_w = max(r*2, int(width * pct / 100))
+    if fill_w > 0:
+        # 渐变模拟：分两段
+        mid = fill_w * 6 // 10
+        canvas.create_rectangle(0, 0, fill_w, height, fill=fill_color, outline='')
+        if mid > 0:
+            canvas.create_rectangle(0, 0, mid, height, fill=accent_color, outline='')
+
+
+# ══════════════════════════════════════════════════════════════
 # 主程序
 # ══════════════════════════════════════════════════════════════
 class App:
 
     THEMES = {
-        '暖黄': dict(bg='#fdf6e3',fg='#3c3836',bar='#ebdbb2',sel='#d5c4a1',thumb='#b8a882',thumb_h='#8f7a55'),
-        '夜间': dict(bg='#1e1e2e',fg='#cdd6f4',bar='#181825',sel='#313244',thumb='#45475a',thumb_h='#6c7086'),
-        '护眼': dict(bg='#1a2f1a',fg='#a8d5a2',bar='#152315',sel='#2d5a2d',thumb='#3a6b3a',thumb_h='#57c454'),
-        '纸张': dict(bg='#f5f0e8',fg='#2c2416',bar='#ede4d0',sel='#c8b89a',thumb='#c8a882',thumb_h='#8b6045'),
-        '白底': dict(bg='#ffffff',fg='#1a1a1a',bar='#f0f0f0',sel='#dddddd',thumb='#bbbbbb',thumb_h='#888888'),
+        '暖黄': dict(bg='#fdf6e3',fg='#3c3836',bar='#ebdbb2',sel='#d5c4a1',
+                    thumb='#b8a882',thumb_h='#8f7a55',accent='#d79921',card='#f5edd6'),
+        '夜间': dict(bg='#1e1e2e',fg='#cdd6f4',bar='#181825',sel='#313244',
+                    thumb='#45475a',thumb_h='#6c7086',accent='#89b4fa',card='#24273a'),
+        '护眼': dict(bg='#1a2f1a',fg='#a8d5a2',bar='#152315',sel='#2d5a2d',
+                    thumb='#3a6b3a',thumb_h='#57c454',accent='#57c454',card='#1e3a1e'),
+        '纸张': dict(bg='#f5f0e8',fg='#2c2416',bar='#ede4d0',sel='#c8b89a',
+                    thumb='#c8a882',thumb_h='#8b6045',accent='#8b6045',card='#ede4d0'),
+        '白底': dict(bg='#ffffff',fg='#1a1a1a',bar='#f5f5f5',sel='#e0e0e0',
+                    thumb='#bbbbbb',thumb_h='#888888',accent='#4a90d9',card='#f0f0f0'),
     }
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('摸鱼阅读器')
-        self.root.geometry('440x630')
-        self.root.minsize(320, 400)
+        self.root.geometry('460x660')
+        self.root.minsize(340, 420)
         self.root.attributes('-topmost', True)
 
-        # 数据
-        self.shelf   = _jload(SHELF_FILE)   # {path: {title,last_ch,total_ch,last_time,read_time}}
-        self.notes   = _jload(NOTES_FILE)   # {path: [{ch,title,content,time}]}
-        self.marks   = _jload(MARKS_FILE)   # {path: [{ch,ch_title,time}]}
+        self.shelf   = _jload(SHELF_FILE)
+        self.notes   = _jload(NOTES_FILE)
+        self.marks   = _jload(MARKS_FILE)
 
         self.book_path  = ''
         self.book_title = ''
         self.chapters   = []
         self.cur_ch     = 0
 
-        # UI 状态
         self.theme_name     = '暖黄'
         self.custom_bg      = None
         self.custom_bar     = None
@@ -12503,8 +15216,9 @@ class App:
         self._settings_open = False
         self._wheel_accum   = 0
         self._tts_playing   = False
-        self._is_boss_mode  = False  # <======== 就是漏了这一行！一定要加在这里！
+        self._is_boss_mode  = False
         self.tts = TTS()
+        self.var_ai_model = tk.StringVar(value='GLM (智谱)')
 
         self._build_ui()
         self._apply_theme()
@@ -12513,50 +15227,69 @@ class App:
         self.root.mainloop()
 
     # ─────────────────────────────────────────────────
-    # UI 构建
+    # ★ UI 构建（问题4：精致扁平风重设计）★
     # ─────────────────────────────────────────────────
     def _build_ui(self):
         r = self.root
 
-        # 顶部栏
-        self.topbar = tk.Frame(r, height=30)
+        # ── 顶部栏（高度提升，分组设计）────────────────
+        self.topbar = tk.Frame(r, height=44)
         self.topbar.pack(fill='x')
         self.topbar.pack_propagate(False)
 
-        dots = tk.Frame(self.topbar)
-        dots.pack(side='left', padx=6, pady=5)
-        self._dot(dots, '#ff5f57', self.toggle_minimize)
-        self._dot(dots, '#ffbd2e', self.toggle_settings)
-        self._dot(dots, '#28ca41', self.open_file)
+        # 左侧：交通灯 + 标题
+        left_f = tk.Frame(self.topbar); left_f.pack(side='left', fill='y', padx=6)
+        dots_f = tk.Frame(left_f); dots_f.pack(side='left', padx=2, pady=14)
+        self._dot(dots_f, '#ff5f57', self.toggle_minimize, '─')
+        self._dot(dots_f, '#ffbd2e', self.toggle_settings, '⚙')
+        self._dot(dots_f, '#28ca41', self.open_file,       '＋')
 
-        self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器', font=('',9))
-        self.lbl_title.pack(side='left', fill='x', expand=True)
+        self.lbl_title = tk.Label(self.topbar, text='摸鱼阅读器 v9',
+                                   font=('', 10, 'bold'), anchor='w')
+        self.lbl_title.pack(side='left', padx=8, fill='y')
 
-        rbf = tk.Frame(self.topbar); rbf.pack(side='right', padx=2)
-        self._tbtn(rbf, '书架', self.open_shelf)
-        self._tbtn(rbf, '目录', self.open_chapters)
-        self._tbtn(rbf, '搜索', self.open_search)
-        self._tbtn(rbf, '摘要', self.open_summary)
-        self._tbtn(rbf, '找章', self.open_chapter_finder)
-        self._tbtn(rbf, '笔记', self.open_notes)
-        self._tbtn(rbf, '书签', self.open_marks)
-        self._tbtn(rbf, '打开', self.open_file)
-        self._tbtn(rbf, '对话', self.open_role_chat)
-        self._tbtn(rbf, '×',   r.destroy)
+        # 右侧：功能图标组（紧凑排列）
+        rbf = tk.Frame(self.topbar); rbf.pack(side='right', padx=6, fill='y')
+        # 分隔线
+        self._vline = tk.Frame(rbf, width=1); self._vline.pack(side='right', fill='y', pady=8, padx=2)
 
-        for w in (self.topbar, self.lbl_title):
+        self._icon_btns = []
+        btn_defs = [
+            ('×',   '',     r.destroy),
+            ('📖', '书架',  self.open_shelf),
+            ('📑', '目录',  self.open_chapters),
+            ('🔍', '搜索',  self.open_search),
+            ('✨', '摘要',  self.open_summary),
+            ('🔮', '找章',  self.open_chapter_finder),
+            ('✏',  '笔记',  self.open_notes),
+            ('🔖', '书签',  self.open_marks),
+            ('💬', '对话',  self.open_role_chat),
+        ]
+        init_theme = self._cur_theme()
+        
+        for icon, label, cmd in reversed(btn_defs):
+            btn = _make_flat_btn(rbf, f'{icon}' if not label else f'{icon}{label}',
+                                  cmd, bg=init_theme['bar'], fg=init_theme['fg'], padx=5, pady=11)
+            btn.pack(side='right', padx=1)
+            self._icon_btns.append(btn)
+
+        for w in (self.topbar, self.lbl_title, left_f, dots_f):
             w.bind('<ButtonPress-1>', self._drag_start)
             w.bind('<B1-Motion>',     self._drag_move)
 
-        # 设置栏
+        # ── 进度条（章节渐变进度，高度4px）────────────
+        self.prog_canvas = tk.Canvas(r, height=3, highlightthickness=0)
+        self.prog_canvas.pack(fill='x')
+
+        # ── 设置栏 ────────────────────────────────────
         self.setbar = tk.Frame(r)
         self._build_setbar()
 
-        # 分隔线
+        # ── 分隔线 ────────────────────────────────────
         self.sep = tk.Frame(r, height=1)
         self.sep.pack(fill='x')
 
-        # 文本区
+        # ── 文本区 ────────────────────────────────────
         self.txt_frame = tk.Frame(r)
         self.txt_frame.pack(fill='both', expand=True)
 
@@ -12565,7 +15298,7 @@ class App:
 
         self.txt = tk.Text(
             self.txt_frame, wrap='word',
-            relief='flat', padx=16, pady=10,
+            relief='flat', padx=18, pady=12,
             state='disabled', cursor='arrow',
             font=(self.font_fam, self.font_size),
             borderwidth=0, highlightthickness=0,
@@ -12581,118 +15314,135 @@ class App:
         self.txt.bind('<Button-5>',   self._on_wheel)
         self._show_welcome()
 
-        # 底部
+        # ── 底部信息栏（卡片式）────────────────────────
         self.bot_area = tk.Frame(r)
         self.bot_area.pack(fill='x', side='bottom')
 
-        self.botbar = tk.Frame(self.bot_area, height=28)
+        self.botbar = tk.Frame(self.bot_area, height=36)
         self.botbar.pack(fill='x')
         self.botbar.pack_propagate(False)
 
-        self.btn_prev = tk.Button(self.botbar, text='◀', font=('',9),
-                                  relief='flat', padx=4, command=self.prev_chapter)
-        self.btn_prev.pack(side='left', padx=4, pady=3)
+        self.btn_prev = tk.Label(self.botbar, text='◀', font=('', 11),
+                                  cursor='hand2', padx=8)
+        self.btn_prev.pack(side='left', pady=6)
+        self.btn_prev.bind('<Button-1>', lambda e: self.prev_chapter())
 
-        self.lbl_prog = tk.Label(self.botbar, text='', font=('',8))
+        self.lbl_prog = tk.Label(self.botbar, text='', font=('', 9))
         self.lbl_prog.pack(side='left', expand=True)
 
-        self.btn_tts = tk.Button(self.botbar, text='🔊', font=('',9),
-                                 relief='flat', padx=3, command=self.toggle_tts)
-        self.btn_tts.pack(side='right', padx=2, pady=3)
+        # 右侧功能按钮组（卡片式）
+        action_f = tk.Frame(self.botbar); action_f.pack(side='right', pady=4, padx=6)
+        self.btn_tts  = tk.Label(action_f, text='🔊', font=('',11), cursor='hand2', padx=5)
+        self.btn_note = tk.Label(action_f, text='✏',  font=('',11), cursor='hand2', padx=5)
+        self.btn_mark = tk.Label(action_f, text='🔖', font=('',11), cursor='hand2', padx=5)
+        self.btn_tts.pack(side='left')
+        self.btn_note.pack(side='left')
+        self.btn_mark.pack(side='left')
+        self.btn_tts.bind('<Button-1>',  lambda e: self.toggle_tts())
+        self.btn_note.bind('<Button-1>', lambda e: self.add_note())
+        self.btn_mark.bind('<Button-1>', lambda e: self.add_mark())
 
-        self.btn_note = tk.Button(self.botbar, text='✏', font=('',9),
-                                  relief='flat', padx=3, command=self.add_note)
-        self.btn_note.pack(side='right', padx=2, pady=3)
+        self.btn_next = tk.Label(self.botbar, text='▶', font=('', 11),
+                                  cursor='hand2', padx=8)
+        self.btn_next.pack(side='right', pady=6)
+        self.btn_next.bind('<Button-1>', lambda e: self.next_chapter())
 
-        self.btn_mark = tk.Button(self.botbar, text='🔖', font=('',9),
-                                  relief='flat', padx=2, command=self.add_mark)
-        self.btn_mark.pack(side='right', padx=2, pady=3)
-
-        self.btn_next = tk.Button(self.botbar, text='▶', font=('',9),
-                                  relief='flat', padx=4, command=self.next_chapter)
-        self.btn_next.pack(side='right', padx=4, pady=3)
-
-    def _tbtn(self, parent, text, cmd):
-        tk.Button(parent, text=text, font=('',8), relief='flat',
-                  padx=3, command=cmd).pack(side='left', padx=1)
-
-    def _dot(self, p, color, cmd):
-        lb = tk.Label(p, text='⬤', fg=color, font=('',12), cursor='hand2')
-        lb.pack(side='left', padx=2)
-        lb.bind('<Button-1>', lambda e: cmd())
+    def _dot(self, p, color, cmd, sym=''):
+        f = tk.Frame(p, bg=color, width=13, height=13, cursor='hand2')
+        f.pack(side='left', padx=2)
+        f.pack_propagate(False)
+        f.bind('<Button-1>', lambda e: cmd())
+        f.bind('<Enter>', lambda e, w=f: w.config(relief='sunken'))
+        f.bind('<Leave>', lambda e, w=f: w.config(relief='flat'))
 
     # ─────────────────────────────────────────────────
-    # 设置栏
+    # 设置栏（重新布局，更清晰）
     # ─────────────────────────────────────────────────
     def _build_setbar(self):
-        def row(): f=tk.Frame(self.setbar); f.pack(fill='x',padx=8,pady=2); return f
+        def row(pady=3):
+            f=tk.Frame(self.setbar); f.pack(fill='x', padx=10, pady=pady); return f
 
+        # 第一行：字号 + 行距
         r1 = row()
-        tk.Label(r1,text='字号',font=('',8)).pack(side='left')
-        self.sl_font = tk.Scale(r1,from_=10,to=32,orient='horizontal',length=70,
+        tk.Label(r1,text='Aa 字号',font=('',8,'bold')).pack(side='left')
+        self.sl_font = tk.Scale(r1,from_=10,to=32,orient='horizontal',length=75,
                                 showvalue=True,font=('',7),command=self._on_font_size)
-        self.sl_font.set(self.font_size); self.sl_font.pack(side='left',padx=2)
-        tk.Label(r1,text='行距',font=('',8)).pack(side='left',padx=(8,0))
-        self.sl_spacing = tk.Scale(r1,from_=0,to=24,orient='horizontal',length=70,
+        self.sl_font.set(self.font_size); self.sl_font.pack(side='left',padx=4)
+        tk.Frame(r1,width=1).pack(side='left',padx=4)
+        tk.Label(r1,text='≡ 行距',font=('',8,'bold')).pack(side='left')
+        self.sl_spacing = tk.Scale(r1,from_=0,to=24,orient='horizontal',length=75,
                                    showvalue=True,font=('',7),command=self._on_spacing)
-        self.sl_spacing.set(self.line_spacing); self.sl_spacing.pack(side='left',padx=2)
+        self.sl_spacing.set(self.line_spacing); self.sl_spacing.pack(side='left',padx=4)
 
+        # 第二行：透明度 + TTS语速
         r2 = row()
-        tk.Label(r2,text='透明',font=('',8)).pack(side='left')
-        self.sl_alpha = tk.Scale(r2,from_=20,to=100,orient='horizontal',length=80,
+        tk.Label(r2,text='◑ 透明',font=('',8,'bold')).pack(side='left')
+        self.sl_alpha = tk.Scale(r2,from_=20,to=100,orient='horizontal',length=75,
                                  showvalue=True,font=('',7),
                                  command=lambda v: self.root.attributes('-alpha',int(v)/100))
-        self.sl_alpha.set(100); self.sl_alpha.pack(side='left',padx=2)
-        # TTS 语速
-        tk.Label(r2,text='语速',font=('',8)).pack(side='left',padx=(8,0))
-        self.sl_tts_rate = tk.Scale(r2,from_=80,to=300,orient='horizontal',length=70,
+        self.sl_alpha.set(100); self.sl_alpha.pack(side='left',padx=4)
+        tk.Frame(r2,width=1).pack(side='left',padx=4)
+        tk.Label(r2,text='🔊 语速',font=('',8,'bold')).pack(side='left')
+        self.sl_tts_rate = tk.Scale(r2,from_=80,to=300,orient='horizontal',length=75,
                                     showvalue=True,font=('',7),
                                     command=lambda v: self.tts.set_rate(int(v)))
-        self.sl_tts_rate.set(180); self.sl_tts_rate.pack(side='left',padx=2)
+        self.sl_tts_rate.set(180); self.sl_tts_rate.pack(side='left',padx=4)
 
+        # 第三行：颜色控制
         r3 = row()
-        tk.Label(r3,text='字色',font=('',8)).pack(side='left')
-        self.btn_fg_color = tk.Button(r3,text='  ',relief='groove',width=2,
-                                      font=('',8),command=self._pick_fg)
-        self.btn_fg_color.pack(side='left',padx=2)
-        tk.Label(r3,text='背景',font=('',8)).pack(side='left',padx=(6,0))
-        self.btn_bg_color = tk.Button(r3,text='  ',relief='groove',width=2,
-                                      font=('',8),command=self._pick_bg)
-        self.btn_bg_color.pack(side='left',padx=2)
-        tk.Button(r3,text='🎨取色',font=('',8),relief='flat',padx=4,
-                  command=self._screen_pick).pack(side='left',padx=4)
-        tk.Button(r3,text='重置',font=('',8),relief='flat',padx=4,
-                  command=self._reset_colors).pack(side='left',padx=2)
+        tk.Label(r3,text='🎨 颜色',font=('',8,'bold')).pack(side='left')
+        self.btn_fg_color = tk.Label(r3,text='字色',relief='groove',
+                                     font=('',8),cursor='hand2',padx=6,pady=2)
+        self.btn_fg_color.bind('<Button-1>', lambda e: self._pick_fg())
+        self.btn_fg_color.pack(side='left',padx=3)
+        self.btn_bg_color = tk.Label(r3,text='背景',relief='groove',
+                                     font=('',8),cursor='hand2',padx=6,pady=2)
+        self.btn_bg_color.bind('<Button-1>', lambda e: self._pick_bg())
+        self.btn_bg_color.pack(side='left',padx=3)
+        tk.Label(r3,text='⊕',font=('',11),cursor='hand2').pack(side='left',padx=1)
+        sc_lbl = tk.Label(r3,text='取色',font=('',8),cursor='hand2',padx=4)
+        sc_lbl.bind('<Button-1>', lambda e: self._screen_pick())
+        sc_lbl.pack(side='left')
+        rst_lbl = tk.Label(r3,text='↺重置',font=('',8),cursor='hand2',padx=6)
+        rst_lbl.bind('<Button-1>', lambda e: self._reset_colors())
+        rst_lbl.pack(side='left',padx=2)
 
+        # 第四行：主题 + 快切 + 伪装
         r4 = row()
-        tk.Label(r4,text='主题',font=('',8)).pack(side='left')
+        tk.Label(r4,text='🌈 主题',font=('',8,'bold')).pack(side='left')
         self.var_theme = tk.StringVar(value=self.theme_name)
         cb = ttk.Combobox(r4,textvariable=self.var_theme,
                           values=list(self.THEMES.keys()),width=7,font=('',8),state='readonly')
         cb.pack(side='left',padx=4); cb.bind('<<ComboboxSelected>>',self._on_theme)
-        # 快速护眼切换
-        tk.Button(r4,text='☘护眼',font=('',8),relief='flat',padx=4,
-                  command=lambda: (self.var_theme.set('护眼'),self._on_theme())).pack(side='left',padx=2)
-        tk.Button(r4,text='🌙夜间',font=('',8),relief='flat',padx=4,
-                  command=lambda: (self.var_theme.set('夜间'),self._on_theme())).pack(side='left',padx=2)
-        # <== 新增：伪装编辑器按钮
-        tk.Button(r4,text='📝伪装内容',font=('',8),relief='flat',padx=4, fg='#2b579a',
-                  command=self.open_boss_editor).pack(side='left',padx=6)
 
-        # ── 新增：AI模型切换 ─────────────────────────
-        r5 = row()
-        tk.Label(r5, text='AI模型', font=('',8)).pack(side='left')
-        self.var_ai_model = tk.StringVar(value='GLM (智谱)')
+        for emoji, theme in [('☘','护眼'),('🌙','夜间'),('☀','暖黄')]:
+            lbl = tk.Label(r4, text=emoji, font=('',12), cursor='hand2')
+            lbl.pack(side='left', padx=2)
+            lbl.bind('<Button-1>', lambda e, t=theme: (self.var_theme.set(t), self._on_theme()))
+
+        word_lbl = tk.Label(r4,text='📝伪装',font=('',8),cursor='hand2',
+                            padx=6,pady=2,relief='groove')
+        word_lbl.bind('<Button-1>', lambda e: self.open_boss_editor())
+        word_lbl.pack(side='left',padx=8)
+
+        # 第五行：AI 模型
+        r5 = row(pady=2)
+        tk.Label(r5, text='🤖 AI',font=('',8,'bold')).pack(side='left')
         cb_ai = ttk.Combobox(r5, textvariable=self.var_ai_model,
-                             values=['GLM (智谱)', 'MiniMax'], width=12, font=('',8), state='readonly')
+                             values=['GLM (智谱)', 'MiniMax'], width=10, font=('',8), state='readonly')
         cb_ai.pack(side='left', padx=4)
+        tk.Label(r5, text='· 快捷：Ctrl+D老板键  F5朗读  O书签  N笔记',
+                 font=('',7), fg='#888').pack(side='left', padx=6)
+
+        # 分隔线
+        tk.Frame(self.setbar, height=1).pack(fill='x', padx=0, pady=2)
 
     # ─────────────────────────────────────────────────
-    # 颜色
+    # 颜色相关
     # ─────────────────────────────────────────────────
     def _pick_fg(self):
         t=self._cur_theme(); c=colorchooser.askcolor(color=t['fg'],title='字体颜色')
-        if c and c[1]: self.THEMES[self.theme_name]['fg']=c[1]; self.txt.config(fg=c[1]); self.btn_fg_color.config(bg=c[1])
+        if c and c[1]: self.THEMES[self.theme_name]['fg']=c[1]; self.txt.config(fg=c[1])
 
     def _pick_bg(self):
         c=colorchooser.askcolor(color=self._cur_theme()['bg'],title='背景颜色')
@@ -12705,8 +15455,6 @@ class App:
 
     def _apply_custom_bg(self,hx):
         self.custom_bg=hx; self.custom_bar=self._darken(hx,0.88); self._apply_theme()
-        try: self.btn_bg_color.config(bg=hx)
-        except: pass
 
     def _reset_colors(self): self.custom_bg=self.custom_bar=None; self._apply_theme()
     def _darken(self,hx,f=0.88):
@@ -12723,20 +15471,63 @@ class App:
         self.theme_name=self.var_theme.get(); self.custom_bg=self.custom_bar=None; self._apply_theme()
 
     def _apply_theme(self):
-        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        t=self._cur_theme()
+        bg,fg,bar,sel = t['bg'],t['fg'],t['bar'],t['sel']
+        accent = t.get('accent', sel)
+        card   = t.get('card', bar)
+
         self.root.configure(bg=bar)
-        self._cf(self.topbar,bar,fg); self._cf(self.botbar,bar,fg); self._cf(self.bot_area,bar,fg)
-        self.sep.config(bg=sel); self.txt_frame.config(bg=bg)
+
+        # 顶部栏
+        self.topbar.config(bg=bar)
+        self.lbl_title.config(bg=bar, fg=fg)
+        for child in self.topbar.winfo_children():
+            try: child.config(bg=bar)
+            except: pass
+            for grandchild in child.winfo_children():
+                try: grandchild.config(bg=bar, fg=fg)
+                except: pass
+
+        # 图标按钮
+        for btn in self._icon_btns:
+            try: btn.config(bg=bar, fg=fg)
+            except: pass
+
+        # 进度条背景
+        self.prog_canvas.config(bg=bar, highlightthickness=0)
+        self._update_prog_bar()
+
+        # 分隔线
+        self.sep.config(bg=sel)
+
+        # 文本区
+        self.txt_frame.config(bg=bg)
         self.vsb.cv.config(bg=bg)
-        self.vsb.set_colors(bg=bg,track=sel,thumb=t.get('thumb',sel),thumb_hover=t.get('thumb_h',fg))
-        self.txt.config(bg=bg,fg=fg,insertbackground=fg,selectbackground=sel)
-        self.lbl_prog.config(bg=bar,fg=fg)
-        for b in (self.btn_prev,self.btn_next,self.btn_mark,self.btn_note,self.btn_tts):
-            b.config(bg=bar,fg=fg,activebackground=sel)
+        self.vsb.set_colors(bg=bg, track=sel,
+                            thumb=t.get('thumb',sel), thumb_hover=t.get('thumb_h',fg))
+        self.txt.config(bg=bg, fg=fg, insertbackground=fg, selectbackground=sel)
+
+        # 底部栏
+        self.bot_area.config(bg=card)
+        self.botbar.config(bg=card)
+        self.lbl_prog.config(bg=card, fg=fg)
+        for w in (self.btn_prev, self.btn_next, self.btn_tts, self.btn_note, self.btn_mark):
+            try: w.config(bg=card, fg=fg)
+            except: pass
+
+        # 设置栏
         self._retheme_setbar()
-        try:
-            if self.custom_bg: self.btn_bg_color.config(bg=self.custom_bg)
-        except: pass
+
+    def _update_prog_bar(self):
+        """更新章节进度渐变条"""
+        if not self.chapters: return
+        t = self._cur_theme()
+        pct = int((self.cur_ch / max(1, len(self.chapters)-1)) * 100)
+        self.prog_canvas.update_idletasks()
+        w = self.prog_canvas.winfo_width()
+        if w < 2: return
+        _draw_progress_bar(self.prog_canvas, pct,
+                           t['bar'], t.get('accent', t['sel']), t['fg'], w, height=3)
 
     def _cf(self,fr,bg,fg):
         try: fr.config(bg=bg)
@@ -12752,9 +15543,12 @@ class App:
         t=self._cur_theme(); bg,fg,sel=t['bar'],t['fg'],t['sel']
         self._cf(self.setbar,bg,fg)
         for sl in (self.sl_font,self.sl_alpha,self.sl_spacing,self.sl_tts_rate):
-            try: sl.config(bg=bg,fg=fg,troughcolor=sel,activebackground=sel)
+            try: sl.config(bg=bg,fg=fg,troughcolor=sel,activebackground=sel,
+                           highlightthickness=0)
             except: pass
-        try: self.btn_fg_color.config(bg=fg)
+        try:
+            self.btn_fg_color.config(bg=t['fg'], fg=t['bg'])
+            self.btn_bg_color.config(bg=t['bg'], fg=t['fg'])
         except: pass
 
     # ─────────────────────────────────────────────────
@@ -12790,15 +15584,13 @@ class App:
                 with open(path,encoding='utf-8',errors='replace') as f: text=f.read()
             except Exception as e: messagebox.showerror('错误',str(e)); return
         self.book_path=path; self.book_title=title
-        self.lbl_title.config(text=f'  {title}'); self.root.title(f'摸鱼阅读器 — {title}')
+        self.lbl_title.config(text=f'  {title[:18]}'); self.root.title(f'摸鱼阅读器 — {title}')
         self._load(text)
 
     def _load(self,text):
         self.chapters = split_chapters(text)
-        # 恢复上次阅读位置
         si = self.shelf.get(self.book_path,{})
         self.cur_ch = max(0,min(si.get('last_ch',0),len(self.chapters)-1))
-        # 更新书架
         self._shelf_update()
         self._render_chapter()
 
@@ -12820,19 +15612,20 @@ class App:
 
     def open_shelf(self):
         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
-        win=tk.Toplevel(self.root); win.title('书架'); win.geometry('380x460')
+        accent = t.get('accent', sel)
+        win=tk.Toplevel(self.root); win.title('书架'); win.geometry('400x500')
         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
 
-        hdr=tk.Frame(win,bg=bar,height=30); hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr,text='📚 书架',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=10,pady=5)
-        tk.Button(hdr,text='+添加',font=('',8),relief='flat',bg=bar,fg=fg,
-                  command=lambda:self._shelf_add(win)).pack(side='right',padx=4)
-        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,
-                  command=win.destroy).pack(side='right',padx=4)
+        hdr=tk.Frame(win,bg=bar,height=36); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='  📚 我的书架',font=('',11,'bold'),bg=bar,fg=fg).pack(side='left',padx=10,pady=8)
+        add_lbl = tk.Label(hdr,text='＋添加',font=('',9),bg=accent,fg='white',
+                           padx=8,pady=3,cursor='hand2')
+        add_lbl.bind('<Button-1>', lambda e: self._shelf_add(win))
+        add_lbl.pack(side='right',padx=8,pady=8)
+        tk.Label(hdr,text='×',font=('',13),bg=bar,fg=fg,cursor='hand2',padx=6).pack(side='right')
 
-        # 书籍列表
         frame=tk.Frame(win,bg=bg); frame.pack(fill='both',expand=True,padx=6,pady=6)
-        sb2=tk.Scrollbar(frame); sb2.pack(side='right',fill='y')
+        sb2=tk.Scrollbar(frame,width=6); sb2.pack(side='right',fill='y')
         canvas=tk.Canvas(frame,bg=bg,highlightthickness=0,yscrollcommand=sb2.set)
         canvas.pack(fill='both',expand=True); sb2.config(command=canvas.yview)
         inner=tk.Frame(canvas,bg=bg); canvas.create_window((0,0),window=inner,anchor='nw')
@@ -12842,45 +15635,46 @@ class App:
             if not self.shelf:
                 tk.Label(inner,text='书架空空，快去添加书吧',font=('',10),bg=bg,fg=sel).pack(pady=30)
             for path,info in sorted(self.shelf.items(),key=lambda x:x[1].get('last_time',''),reverse=True):
-                self._shelf_card(inner,path,info,bg,fg,bar,sel,win,refresh)
+                self._shelf_card(inner,path,info,bg,fg,bar,sel,accent,win,refresh)
             inner.update_idletasks()
             canvas.config(scrollregion=canvas.bbox('all'))
         refresh()
 
         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
-        win.geometry(f'380x460+{rx}+{ry}')
+        win.geometry(f'400x500+{rx}+{ry}')
 
-    def _shelf_card(self,parent,path,info,bg,fg,bar,sel,shelf_win,refresh):
+    def _shelf_card(self,parent,path,info,bg,fg,bar,sel,accent,shelf_win,refresh):
         card=tk.Frame(parent,bg=bar,relief='flat',bd=0)
-        card.pack(fill='x',padx=4,pady=3)
-        # 封面色块
-        colors=['#8f3f71','#458588','#d79921','#689d6a','#cc241d']
+        card.pack(fill='x',padx=6,pady=4)
+        colors=['#8f3f71','#458588','#d79921','#689d6a','#cc241d','#3c78d8']
         ccolor=colors[hash(path)%len(colors)]
-        cover=tk.Frame(card,bg=ccolor,width=36,height=50); cover.pack(side='left',padx=6,pady=6); cover.pack_propagate(False)
-        tk.Label(cover,text='📖',font=('',14),bg=ccolor).pack(expand=True)
-        # 信息
-        info_f=tk.Frame(card,bg=bar); info_f.pack(side='left',fill='both',expand=True,pady=4)
-        tk.Label(info_f,text=info.get('title','未知'),font=('',9,'bold'),bg=bar,fg=fg,anchor='w').pack(fill='x')
+        cover=tk.Frame(card,bg=ccolor,width=40,height=56); cover.pack(side='left',padx=8,pady=8); cover.pack_propagate(False)
+        tk.Label(cover,text='📖',font=('',16),bg=ccolor).pack(expand=True)
+        info_f=tk.Frame(card,bg=bar); info_f.pack(side='left',fill='both',expand=True,pady=6)
+        tk.Label(info_f,text=info.get('title','未知'),font=('',10,'bold'),bg=bar,fg=fg,anchor='w').pack(fill='x')
         lc=info.get('last_ch',0); tc=info.get('total_ch',1)
         pct=int(lc/max(1,tc-1)*100) if tc>1 else 0
-        tk.Label(info_f,text=f'第{lc+1}/{tc}章  {pct}%',font=('',8),bg=bar,fg=sel,anchor='w').pack(fill='x')
-        # 进度条
-        pb_f=tk.Frame(info_f,bg=bar,height=4); pb_f.pack(fill='x',pady=2); pb_f.pack_propagate(False)
-        pb_done=tk.Frame(pb_f,bg=ccolor,height=4); pb_done.place(x=0,y=0,relwidth=pct/100,relheight=1)
-        tk.Frame(pb_f,bg=sel,height=4).place(x=0,y=0,relwidth=1,relheight=1)
-        pb_done.lift()
-        tk.Label(info_f,text=f'上次：{info.get("last_time","")}',font=('',7),bg=bar,fg=sel,anchor='w').pack(fill='x')
-        # 按钮
-        btn_f=tk.Frame(card,bg=bar); btn_f.pack(side='right',padx=6,pady=4)
-        def open_it(p=path):
-            shelf_win.destroy(); self.open_file(p)
+        tk.Label(info_f,text=f'第 {lc+1} / {tc} 章  ·  {pct}%',font=('',8),bg=bar,fg=sel,anchor='w').pack(fill='x',pady=1)
+        pb_f=tk.Canvas(info_f,height=4,bg=bar,highlightthickness=0)
+        pb_f.pack(fill='x',pady=2)
+        pb_f.update_idletasks()
+        pb_w = max(1, pb_f.winfo_width())
+        fill_w = max(0, int(pb_w * pct / 100))
+        pb_f.create_rectangle(0,0,pb_w,4,fill=sel,outline='')
+        if fill_w>0: pb_f.create_rectangle(0,0,fill_w,4,fill=ccolor,outline='')
+        tk.Label(info_f,text=f'上次阅读：{info.get("last_time","")}',font=('',7),bg=bar,fg=sel,anchor='w').pack(fill='x')
+        btn_f=tk.Frame(card,bg=bar); btn_f.pack(side='right',padx=8,pady=6)
+        def open_it(p=path): shelf_win.destroy(); self.open_file(p)
         def del_it(p=path):
             if messagebox.askyesno('删除','从书架移除此书？',parent=shelf_win):
                 del self.shelf[p]; _jsave(SHELF_FILE,self.shelf); refresh()
-        tk.Button(btn_f,text='阅读',font=('',8),relief='flat',bg=ccolor,fg='white',
-                  padx=6,command=open_it).pack(pady=2)
-        tk.Button(btn_f,text='移除',font=('',7),relief='flat',bg=bar,fg=sel,
-                  padx=4,command=del_it).pack(pady=2)
+        read_lbl = tk.Label(btn_f,text='阅读',font=('',9,'bold'),bg=ccolor,fg='white',
+                            padx=10,pady=4,cursor='hand2')
+        read_lbl.bind('<Button-1>', lambda e: open_it())
+        read_lbl.pack(pady=2)
+        del_lbl = tk.Label(btn_f,text='移除',font=('',8),bg=bar,fg=sel,padx=6,cursor='hand2')
+        del_lbl.bind('<Button-1>', lambda e: del_it())
+        del_lbl.pack(pady=1)
 
     def _shelf_add(self, shelf_win):
         path=filedialog.askopenfilename(title='选择书籍',
@@ -12905,16 +15699,19 @@ class App:
         if scroll_to_top: self.txt.yview_moveto(0.0)
         self._update_nav(); self._wheel_accum=0
         self._shelf_update()
+        # 更新进度条
+        self.root.after(50, self._update_prog_bar)
 
     def _update_nav(self):
         n=len(self.chapters); idx=self.cur_ch+1
-        # 有无书签/笔记标记
         m_chs={m['ch'] for m in self.marks.get(self.book_path,[])}
         n_chs={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
         flags=('🔖' if self.cur_ch in m_chs else '')+('✏' if self.cur_ch in n_chs else '')
-        self.lbl_prog.config(text=f'{flags}  第{idx}/{n}章')
-        self.btn_prev.config(state='normal' if self.cur_ch>0   else 'disabled')
-        self.btn_next.config(state='normal' if self.cur_ch<n-1 else 'disabled')
+        self.lbl_prog.config(text=f'{flags}  第 {idx} / {n} 章')
+        # 按钮状态用颜色区分
+        t = self._cur_theme()
+        self.btn_prev.config(fg=t['fg'] if self.cur_ch>0   else t['sel'])
+        self.btn_next.config(fg=t['fg'] if self.cur_ch<n-1 else t['sel'])
 
     def _on_yscroll(self,lo,hi): self.vsb.set(lo,hi)
 
@@ -12959,15 +15756,14 @@ class App:
         else: self.txt.yview_scroll(1,'pages')
 
     # ─────────────────────────────────────────────────
-    # TTS 听书
+    # TTS
     # ─────────────────────────────────────────────────
     def toggle_tts(self):
         if not self.tts.available:
             messagebox.showinfo('提示','请先安装 pyttsx3：\npip install pyttsx3'); return
         if self._tts_playing:
             self.tts.stop(); self._tts_playing=False
-            self.btn_tts.config(text='🔊')
-            self._toast('⏹ 已停止朗读')
+            self.btn_tts.config(text='🔊'); self._toast('⏹ 已停止朗读')
         else:
             if not self.chapters: return
             ch=self.chapters[self.cur_ch]
@@ -12980,7 +15776,7 @@ class App:
         self._tts_playing=False; self.btn_tts.config(text='🔊')
 
     # ─────────────────────────────────────────────────
-    # 书签（O 键）
+    # 书签
     # ─────────────────────────────────────────────────
     def add_mark(self):
         if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
@@ -12995,20 +15791,20 @@ class App:
     def open_marks(self):
         marks=self.marks.get(self.book_path,[])
         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
-        win=tk.Toplevel(self.root); win.title('书签'); win.geometry('300x360')
+        win=tk.Toplevel(self.root); win.title('书签'); win.geometry('320x380')
         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
-        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr,text='🔖 书签列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
-        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
-        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
-        sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+        hdr=tk.Frame(win,bg=bar,height=32); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='  🔖 书签列表',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=6)
+        tk.Label(hdr,text='×',font=('',12),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
+        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=6,pady=6)
+        sb2=tk.Scrollbar(lf,width=6); sb2.pack(side='right',fill='y')
         lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
                       selectforeground=fg,borderwidth=0,highlightthickness=0,
                       activestyle='none',yscrollcommand=sb2.set)
         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
         rows=list(marks)
-        for m in rows: lb.insert('end',f"  🏴 第{m['ch']+1}章  {m['ch_title']}  {m['time']}")
-        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+        for m in rows: lb.insert('end',f"  🔖  第{m['ch']+1}章  {m['ch_title'][:16]}  ·  {m['time']}")
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=8,pady=6)
         def jump():
             idxs=lb.curselection()
             if not idxs: return
@@ -13019,38 +15815,40 @@ class App:
             m=rows.pop(idxs[0]); lb.delete(idxs[0])
             self.marks[self.book_path]=[x for x in self.marks.get(self.book_path,[]) if x is not m]
             _jsave(MARKS_FILE,self.marks); self._update_nav()
-        tk.Button(bf,text='跳转',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
-        tk.Button(bf,text='删除',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+        jmp_lbl = tk.Label(bf,text='↩ 跳转',font=('',9,'bold'),bg=t.get('accent',sel),fg='white',
+                           padx=10,pady=4,cursor='hand2')
+        jmp_lbl.bind('<Button-1>', lambda e: jump())
+        jmp_lbl.pack(side='left',padx=4)
+        del_lbl = tk.Label(bf,text='🗑 删除',font=('',9),bg=bar,fg=fg,padx=8,cursor='hand2')
+        del_lbl.bind('<Button-1>', lambda e: delete())
+        del_lbl.pack(side='left')
         lb.bind('<Double-Button-1>',lambda e:jump())
         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
-        win.geometry(f'300x360+{rx}+{ry}')
+        win.geometry(f'320x380+{rx}+{ry}')
 
     # ─────────────────────────────────────────────────
-    # 笔记（N 键）
+    # 笔记
     # ─────────────────────────────────────────────────
     def add_note(self):
         if not self.book_path: messagebox.showinfo('提示','请先打开书'); return
         ch=self.chapters[self.cur_ch]
         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
-        win=tk.Toplevel(self.root); win.title('添加笔记'); win.geometry('340x260')
+        win=tk.Toplevel(self.root); win.title('添加笔记'); win.geometry('360x280')
         win.attributes('-topmost',True); win.configure(bg=bg)
-        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr,text=f'✏ 笔记 — {ch["title"][:20]}',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
-        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
-        # 选中文字自动填入
+        hdr=tk.Frame(win,bg=bar,height=32); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text=f'  ✏ 笔记 — {ch["title"][:20]}',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=6)
+        tk.Label(hdr,text='×',font=('',12),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
         sel_text=''
         try: sel_text=self.txt.get(tk.SEL_FIRST,tk.SEL_LAST)
         except: pass
         if sel_text:
-            tk.Label(win,text='引用文字：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
             ref=tk.Label(win,text=sel_text[:80]+'…' if len(sel_text)>80 else sel_text,
-                        font=('',8,'italic'),bg=sel,fg=fg,wraplength=300,anchor='w',justify='left')
-            ref.pack(fill='x',padx=8,pady=2)
-        tk.Label(win,text='笔记内容：',font=('',8),bg=bg,fg=fg).pack(anchor='w',padx=8,pady=(6,0))
+                        font=('',8,'italic'),bg=sel,fg=fg,wraplength=320,anchor='w',justify='left',padx=8,pady=4)
+            ref.pack(fill='x',padx=10,pady=(8,0))
         ta=tk.Text(win,height=6,font=('',10),bg=bg,fg=fg,insertbackground=fg,
-                   relief='flat',padx=8,pady=4,wrap='word',borderwidth=1,highlightthickness=1,
-                   highlightbackground=sel,highlightcolor=fg)
-        ta.pack(fill='both',expand=True,padx=8,pady=4); ta.focus()
+                   relief='flat',padx=10,pady=6,wrap='word',borderwidth=1,highlightthickness=1,
+                   highlightbackground=sel,highlightcolor=t.get('accent',fg))
+        ta.pack(fill='both',expand=True,padx=10,pady=6); ta.focus()
         def save():
             content=ta.get('1.0','end').strip()
             if not content: win.destroy(); return
@@ -13060,39 +15858,36 @@ class App:
                           'quote':sel_text,'time':now})
             _jsave(NOTES_FILE,self.notes); self._update_nav(); win.destroy()
             self._toast('✏ 笔记已保存')
-        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=8,pady=4)
-        tk.Button(bf,text='保存笔记',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',
-                  padx=10,command=save).pack(side='right',padx=4)
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=10,pady=6)
+        save_lbl = tk.Label(bf,text='保存笔记 (Ctrl+↵)',font=('',9,'bold'),
+                            bg=t.get('accent',sel),fg='white',padx=12,pady=4,cursor='hand2')
+        save_lbl.bind('<Button-1>', lambda e: save())
+        save_lbl.pack(side='right',padx=4)
         win.bind('<Control-Return>',lambda e:save())
 
     def open_notes(self):
         notes=self.notes.get(self.book_path,[])
         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
-        win=tk.Toplevel(self.root); win.title('笔记'); win.geometry('360x480')
+        win=tk.Toplevel(self.root); win.title('笔记'); win.geometry('380x500')
         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
-        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr,text='✏ 笔记列表',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
-        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
-
-        # 列表 + 详情
-        paned=tk.PanedWindow(win,orient='vertical',bg=bg,sashwidth=4,sashrelief='flat')
+        hdr=tk.Frame(win,bg=bar,height=32); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='  ✏ 笔记列表',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=6)
+        tk.Label(hdr,text='×',font=('',12),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
+        paned=tk.PanedWindow(win,orient='vertical',bg=bg,sashwidth=5,sashrelief='flat')
         paned.pack(fill='both',expand=True,padx=4,pady=4)
-
         top_f=tk.Frame(paned,bg=bg); paned.add(top_f,height=200)
-        sb2=tk.Scrollbar(top_f); sb2.pack(side='right',fill='y')
+        sb2=tk.Scrollbar(top_f,width=6); sb2.pack(side='right',fill='y')
         lb=tk.Listbox(top_f,font=('',9),relief='flat',bg=bg,fg=fg,selectbackground=sel,
                       selectforeground=fg,borderwidth=0,highlightthickness=0,
                       activestyle='none',yscrollcommand=sb2.set)
         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
         rows=list(notes)
-        for n2 in rows: lb.insert('end',f"  第{n2['ch']+1}章  {n2['ch_title'][:16]}  {n2['time']}")
-
+        for n2 in rows: lb.insert('end',f"  第{n2['ch']+1}章  {n2['ch_title'][:16]}  ·  {n2['time']}")
         bot_f=tk.Frame(paned,bg=bg); paned.add(bot_f)
         detail=tk.Text(bot_f,font=('',10),bg=bg,fg=fg,insertbackground=fg,
-                       relief='flat',padx=8,pady=6,wrap='word',state='disabled',
+                       relief='flat',padx=10,pady=8,wrap='word',state='disabled',
                        borderwidth=0,highlightthickness=0)
         detail.pack(fill='both',expand=True)
-
         def show_detail(event=None):
             idxs=lb.curselection()
             if not idxs: return
@@ -13102,8 +15897,7 @@ class App:
             detail.insert('end',n2['content'])
             detail.config(state='disabled')
         lb.bind('<<ListboxSelect>>',show_detail)
-
-        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=6,pady=4)
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=8,pady=6)
         def jump():
             idxs=lb.curselection()
             if not idxs: return
@@ -13115,11 +15909,16 @@ class App:
             self.notes[self.book_path]=[x for x in self.notes.get(self.book_path,[]) if x is not n2]
             _jsave(NOTES_FILE,self.notes); self._update_nav()
             detail.config(state='normal'); detail.delete('1.0','end'); detail.config(state='disabled')
-        tk.Button(bf,text='跳转章节',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=jump).pack(side='left',padx=4)
-        tk.Button(bf,text='删除笔记',font=('',9),bg=bar,fg=fg,relief='flat',padx=8,command=delete).pack(side='left')
+        jmp_lbl = tk.Label(bf,text='↩ 跳转章节',font=('',9,'bold'),
+                           bg=t.get('accent',sel),fg='white',padx=10,pady=4,cursor='hand2')
+        jmp_lbl.bind('<Button-1>', lambda e: jump())
+        jmp_lbl.pack(side='left',padx=4)
+        del_lbl = tk.Label(bf,text='🗑 删除',font=('',9),bg=bar,fg=fg,padx=8,cursor='hand2')
+        del_lbl.bind('<Button-1>', lambda e: delete())
+        del_lbl.pack(side='left')
         lb.bind('<Double-Button-1>',lambda e:jump())
         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
-        win.geometry(f'360x480+{rx}+{ry}')
+        win.geometry(f'380x500+{rx}+{ry}')
 
     # ─────────────────────────────────────────────────
     # 章节目录
@@ -13127,35 +15926,39 @@ class App:
     def open_chapters(self):
         if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
         t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        accent=t.get('accent',sel)
         mark_set={m['ch'] for m in self.marks.get(self.book_path,[])}
         note_set={n2['ch'] for n2 in self.notes.get(self.book_path,[])}
-        win=tk.Toplevel(self.root); win.title('章节目录'); win.geometry('300x500')
+        win=tk.Toplevel(self.root); win.title('章节目录'); win.geometry('320x520')
         win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
-        hdr=tk.Frame(win,bg=bar,height=28); hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr,text='📑 章节目录',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=4)
-        tk.Button(hdr,text='×',relief='flat',font=('',10),bg=bar,fg=fg,command=win.destroy).pack(side='right',padx=6)
-        sf=tk.Frame(win,bg=bg); sf.pack(fill='x',padx=6,pady=(6,2))
+        hdr=tk.Frame(win,bg=bar,height=32); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='  📑 章节目录',font=('',10,'bold'),bg=bar,fg=fg).pack(side='left',padx=8,pady=6)
+        tk.Label(hdr,text='×',font=('',12),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
+        sf=tk.Frame(win,bg=bg); sf.pack(fill='x',padx=8,pady=(8,4))
         sv=tk.StringVar()
-        se=tk.Entry(sf,textvariable=sv,font=('',9),bg=bg,fg=fg,insertbackground=fg,relief='groove')
-        se.pack(fill='x',ipady=3)
-        PH='搜索章节名...'
+        se=tk.Entry(sf,textvariable=sv,font=('',10),bg=bg,fg=fg,insertbackground=fg,
+                    relief='flat',borderwidth=1,highlightthickness=1,
+                    highlightbackground=sel,highlightcolor=accent)
+        se.pack(fill='x',ipady=4)
+        PH='🔍 搜索章节名…'
         se.insert(0,PH); se.config(fg='gray')
         se.bind('<FocusIn>',lambda e:(se.delete(0,'end'),se.config(fg=fg)) if se.get()==PH else None)
         se.bind('<FocusOut>',lambda e:(se.insert(0,PH),se.config(fg='gray')) if not se.get() else None)
-        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=4,pady=4)
-        sb2=tk.Scrollbar(lf); sb2.pack(side='right',fill='y')
+        lf=tk.Frame(win,bg=bg); lf.pack(fill='both',expand=True,padx=6,pady=4)
+        sb2=tk.Scrollbar(lf,width=6); sb2.pack(side='right',fill='y')
         lb=tk.Listbox(lf,font=('',10),relief='flat',bg=bg,fg=fg,selectbackground=sel,
                       selectforeground=fg,borderwidth=0,highlightthickness=0,
                       activestyle='none',yscrollcommand=sb2.set)
         lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
-        btn_j=tk.Button(win,text='↩ 跳转',font=('',9,'bold'),bg=bar,fg=fg,relief='flat',pady=5)
-        btn_j.pack(fill='x',padx=6,pady=4)
+        jmp_lbl=tk.Label(win,text='↩ 跳转到此章',font=('',10,'bold'),
+                         bg=accent,fg='white',pady=7,cursor='hand2')
+        jmp_lbl.pack(fill='x',padx=8,pady=6)
         all_ch=list(self.chapters); visible=list(range(len(all_ch)))
         def fill(indices):
             visible.clear(); visible.extend(indices); lb.delete(0,'end')
             for i in indices:
                 flags=('🔖' if i in mark_set else '')+('✏' if i in note_set else '')
-                cur='▶ ' if i==self.cur_ch else '  '
+                cur='▶ ' if i==self.cur_ch else '   '
                 lb.insert('end',f'{cur}{i+1}. {all_ch[i]["title"]}{flags}')
         fill(range(len(all_ch)))
         try: lb.see(self.cur_ch); lb.selection_set(self.cur_ch)
@@ -13168,24 +15971,25 @@ class App:
             idxs=lb.curselection()
             if not idxs: return
             win.destroy(); self.goto_chapter(visible[idxs[0]])
-        btn_j.config(command=jump); lb.bind('<Double-Button-1>',jump); lb.bind('<Return>',jump)
+        jmp_lbl.bind('<Button-1>', jump)
+        lb.bind('<Double-Button-1>',jump); lb.bind('<Return>',jump)
         rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
-        win.geometry(f'300x500+{rx}+{ry}')
+        win.geometry(f'320x520+{rx}+{ry}')
 
     # ─────────────────────────────────────────────────
     # Toast 提示
     # ─────────────────────────────────────────────────
-    def _toast(self,msg,ms=1500):
-        t=self._cur_theme()
+    def _toast(self,msg,ms=1600):
+        t=self._cur_theme(); accent=t.get('accent',t['sel'])
         try:
             for w in self.root.winfo_children():
                 if isinstance(w,tk.Label) and getattr(w,'_is_toast',False): w.destroy()
         except: pass
-        toast=tk.Label(self.root,text=msg,font=('',8),bg=t['bar'],fg=t['fg'],
-                       padx=10,pady=4,relief='flat')
+        toast=tk.Label(self.root,text=f'  {msg}  ',font=('',9),
+                       bg=accent,fg='white',padx=8,pady=5,relief='flat')
         toast._is_toast=True
-        toast.place(relx=0.5,rely=0.06,anchor='n')
-        self.root.after(ms,lambda: (toast.winfo_exists() and toast.destroy()))
+        toast.place(relx=0.5,rely=0.07,anchor='n')
+        self.root.after(ms,lambda:(toast.winfo_exists() and toast.destroy()))
 
     # ─────────────────────────────────────────────────
     # 欢迎页
@@ -13194,11 +15998,11 @@ class App:
         self.txt.config(state='normal'); self.txt.delete('1.0','end')
         self.txt.insert('1.0',(
             '\n\n\n'
-            '        📚  摸鱼阅读器  v8.5\n\n'
-            '  支持：TXT  /  EPUB  /  MD\n\n'
-            '  顶部按钮：书架  目录  笔记  书签  打开\n\n'
-            '  操作：\n'
-            '    滚轮 / 拖拽右侧滚动条  章内滚动\n'
+            '        📚  摸鱼阅读器  v9.0\n\n'
+            '  支持格式：TXT  /  EPUB  /  MD\n\n'
+            '  顶部按钮：书架  目录  搜索  摘要  找章  笔记  书签  对话\n\n'
+            '  滚动操作：\n'
+            '    滚轮 / 拖拽右侧滑块    章内滚动\n'
             '    滚到章末再滚           切下一章\n'
             '    点击左侧 28% / 右侧    切上下章\n'
             '    ← →  切章   S/↓  翻屏\n\n'
@@ -13206,22 +16010,27 @@ class App:
             '    O        添加书签\n'
             '    N        添加笔记\n'
             '    F5       开始/停止朗读\n'
-            '    Ctrl+D   老板键(Word伪装)\n'
-            '    D+E      最小化\n'
+            '    Ctrl+D   老板键（Word 伪装）\n'
+            '    Ctrl+F   全文搜索\n'
+            '    Ctrl+M   章节摘要（AI）\n'
+            '    Ctrl+G   AI 章节查找\n'
+            '    D+E      最小化\n\n'
+            '  顶部进度条 = 当前阅读进度\n'
         ))
         self.txt.config(state='disabled')
 
     # ─────────────────────────────────────────────────
-    # 最小化
+    # 最小化 / 设置
     # ─────────────────────────────────────────────────
     def toggle_minimize(self):
         self._minimized=not self._minimized
         if self._minimized:
             self._saved_h=self.root.winfo_height()
-            for w in (self.setbar,self.sep,self.txt_frame,self.bot_area): w.pack_forget()
-            self.root.geometry(f'{self.root.winfo_width()}x30')
+            for w in (self.setbar,self.sep,self.txt_frame,self.bot_area,self.prog_canvas): w.pack_forget()
+            self.root.geometry(f'{self.root.winfo_width()}x44')
         else:
             self.root.geometry(f'{self.root.winfo_width()}x{self._saved_h}')
+            self.prog_canvas.pack(fill='x',after=self.topbar)
             self.sep.pack(fill='x',after=self.topbar)
             if self._settings_open: self.setbar.pack(fill='x',after=self.topbar); self._retheme_setbar()
             self.txt_frame.pack(fill='both',expand=True)
@@ -13233,173 +16042,112 @@ class App:
         else: self.setbar.pack_forget()
 
     # ─────────────────────────────────────────────────
-    # 全文搜索（Ctrl+F）
+    # 全文搜索
     # ─────────────────────────────────────────────────
     def open_search(self):
-        if not self.chapters:
-            messagebox.showinfo('提示', '请先打开小说'); return
-
-        t = self._cur_theme()
-        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
-
-        if hasattr(self, '_search_win') and self._search_win.winfo_exists():
+        if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        accent=t.get('accent',sel)
+        if hasattr(self,'_search_win') and self._search_win.winfo_exists():
             self._search_win.lift(); self._search_win.focus_force(); return
-
-        win = tk.Toplevel(self.root)
-        win.title('全文搜索')
-        win.geometry('480x560')
-        win.resizable(True, True)
-        win.attributes('-topmost', True)
-        win.configure(bg=bg)
-        self._search_win = win
-
-        top = tk.Frame(win, bg=bar); top.pack(fill='x', padx=0, pady=0)
-        tk.Label(top, text='🔍', font=('',11), bg=bar, fg=fg).pack(side='left', padx=8, pady=6)
-
-        sv = tk.StringVar()
-        entry = tk.Entry(top, textvariable=sv, font=('',11), bg=bg, fg=fg,
-                         insertbackground=fg, relief='flat', bd=0)
-        entry.pack(side='left', fill='x', expand=True, ipady=4)
-
-        var_case  = tk.BooleanVar(value=False)
-        var_regex = tk.BooleanVar(value=False)
-        tk.Checkbutton(top, text='Aa', variable=var_case, font=('',8),
-                       bg=bar, fg=fg, activebackground=bar,
-                       selectcolor=bg).pack(side='left', padx=2)
-        tk.Checkbutton(top, text='.*', variable=var_regex, font=('',8),
-                       bg=bar, fg=fg, activebackground=bar,
-                       selectcolor=bg).pack(side='left', padx=2)
-
-        lbl_count = tk.Label(top, text='', font=('',8), bg=bar, fg=sel)
-        lbl_count.pack(side='left', padx=6)
-        tk.Button(top, text='×', relief='flat', font=('',10),
-                  bg=bar, fg=fg, command=win.destroy).pack(side='right', padx=6)
-
-        sep2 = tk.Frame(win, height=1, bg=sel); sep2.pack(fill='x')
-
-        list_frame = tk.Frame(win, bg=bg); list_frame.pack(fill='both', expand=True)
-        sb2 = tk.Scrollbar(list_frame); sb2.pack(side='right', fill='y')
-        lb = tk.Listbox(list_frame, font=('',9), relief='flat', bg=bg, fg=fg,
-                        selectbackground=sel, selectforeground=fg,
-                        borderwidth=0, highlightthickness=0,
-                        activestyle='none', yscrollcommand=sb2.set)
-        lb.pack(fill='both', expand=True); sb2.config(command=lb.yview)
-
-        sep3 = tk.Frame(win, height=1, bg=sel); sep3.pack(fill='x')
-        preview_frame = tk.Frame(win, bg=bg, height=130)
-        preview_frame.pack(fill='x', padx=0); preview_frame.pack_propagate(False)
-
-        preview = tk.Text(preview_frame, font=('',9), bg=bg, fg=fg,
-                          relief='flat', padx=12, pady=6, wrap='word',
-                          state='disabled', borderwidth=0, highlightthickness=0)
-        preview.pack(fill='both', expand=True)
-        preview.tag_config('hit',  background='#d79921', foreground='#1d2021')
-        preview.tag_config('info', foreground=sel)
-
-        bot_f = tk.Frame(win, bg=bar, height=30)
-        bot_f.pack(fill='x'); bot_f.pack_propagate(False)
-        lbl_loc = tk.Label(bot_f, text='', font=('',8), bg=bar, fg=fg)
-        lbl_loc.pack(side='left', padx=8, pady=4)
-        btn_jump = tk.Button(bot_f, text='↩ 跳转到此处', font=('',8,'bold'),
-                             bg=bar, fg=fg, relief='flat', padx=8,
-                             state='disabled')
-        btn_jump.pack(side='right', padx=8, pady=3)
-
-        results = []
-
+        win=tk.Toplevel(self.root); win.title('全文搜索'); win.geometry('500x580')
+        win.resizable(True,True); win.attributes('-topmost',True); win.configure(bg=bg)
+        self._search_win=win
+        top=tk.Frame(win,bg=bar,height=40); top.pack(fill='x'); top.pack_propagate(False)
+        tk.Label(top,text='🔍',font=('',12),bg=bar,fg=fg).pack(side='left',padx=10,pady=8)
+        sv=tk.StringVar()
+        entry=tk.Entry(top,textvariable=sv,font=('',11),bg=bg,fg=fg,
+                       insertbackground=fg,relief='flat',bd=0)
+        entry.pack(side='left',fill='x',expand=True,ipady=6)
+        var_case=tk.BooleanVar(value=False); var_regex=tk.BooleanVar(value=False)
+        tk.Checkbutton(top,text='Aa',variable=var_case,font=('',8),bg=bar,fg=fg,
+                       activebackground=bar,selectcolor=bg).pack(side='left',padx=2)
+        tk.Checkbutton(top,text='.*',variable=var_regex,font=('',8),bg=bar,fg=fg,
+                       activebackground=bar,selectcolor=bg).pack(side='left',padx=2)
+        lbl_count=tk.Label(top,text='',font=('',8),bg=bar,fg=sel); lbl_count.pack(side='left',padx=6)
+        tk.Label(top,text='×',font=('',12),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
+        tk.Frame(win,height=1,bg=sel).pack(fill='x')
+        list_frame=tk.Frame(win,bg=bg); list_frame.pack(fill='both',expand=True)
+        sb2=tk.Scrollbar(list_frame,width=6); sb2.pack(side='right',fill='y')
+        lb=tk.Listbox(list_frame,font=('',9),relief='flat',bg=bg,fg=fg,
+                      selectbackground=sel,selectforeground=fg,
+                      borderwidth=0,highlightthickness=0,activestyle='none',yscrollcommand=sb2.set)
+        lb.pack(fill='both',expand=True); sb2.config(command=lb.yview)
+        tk.Frame(win,height=1,bg=sel).pack(fill='x')
+        preview_frame=tk.Frame(win,bg=bg,height=130); preview_frame.pack(fill='x'); preview_frame.pack_propagate(False)
+        preview=tk.Text(preview_frame,font=('',9),bg=bg,fg=fg,relief='flat',padx=14,pady=8,wrap='word',
+                        state='disabled',borderwidth=0,highlightthickness=0)
+        preview.pack(fill='both',expand=True)
+        preview.tag_config('hit',background=accent,foreground='white')
+        preview.tag_config('info',foreground=sel)
+        bot_f=tk.Frame(win,bg=bar,height=36); bot_f.pack(fill='x'); bot_f.pack_propagate(False)
+        lbl_loc=tk.Label(bot_f,text='',font=('',8),bg=bar,fg=fg); lbl_loc.pack(side='left',padx=10,pady=8)
+        btn_jump=tk.Label(bot_f,text='↩ 跳转到此处',font=('',9,'bold'),
+                          bg=accent,fg='white',padx=10,pady=5,cursor='hand2')
+        btn_jump.pack(side='right',padx=10,pady=5)
+        results=[]
         def do_search(*_):
-            results.clear(); lb.delete(0, 'end')
-            query = sv.get().strip()
-            if not query:
-                lbl_count.config(text=''); return
-
-            flags = 0 if var_case.get() else re.IGNORECASE
+            results.clear(); lb.delete(0,'end')
+            query=sv.get().strip()
+            if not query: lbl_count.config(text=''); return
+            flags=0 if var_case.get() else re.IGNORECASE
             try:
-                if var_regex.get(): pat = re.compile(query, flags)
-                else:               pat = re.compile(re.escape(query), flags)
-            except re.error as e:
-                lbl_count.config(text=f'正则错误: {e}'); return
-
-            CONTEXT = 40
-            for ci, ch in enumerate(self.chapters):
+                pat=re.compile(query if var_regex.get() else re.escape(query),flags)
+            except re.error as e: lbl_count.config(text=f'正则错误: {e}'); return
+            CONTEXT=40
+            for ci,ch in enumerate(self.chapters):
                 for m in pat.finditer(ch['body']):
-                    s, e2 = m.start(), m.end()
-                    pre  = ch['body'][max(0, s-CONTEXT):s].replace('\n', ' ')
-                    hit  = ch['body'][s:e2]
-                    post = ch['body'][e2:min(len(ch['body']), e2+CONTEXT)].replace('\n', ' ')
-                    snippet = (pre, hit, post)
-                    results.append((ci, s, e2, snippet))
-
+                    s,e2=m.start(),m.end()
+                    pre=ch['body'][max(0,s-CONTEXT):s].replace('\n',' ')
+                    hit=ch['body'][s:e2]
+                    post=ch['body'][e2:min(len(ch['body']),e2+CONTEXT)].replace('\n',' ')
+                    results.append((ci,s,e2,(pre,hit,post)))
             lbl_count.config(text=f'共 {len(results)} 处')
-            for ci, s, e2, (pre, hit, post) in results:
-                ch_title = self.chapters[ci]['title']
-                display  = f"  第{ci+1}章  {ch_title[:14]}…  「{hit[:20]}」"
-                lb.insert('end', display)
-
-            preview.config(state='normal'); preview.delete('1.0','end')
-            preview.config(state='disabled')
+            for ci,s,e2,(pre,hit,post) in results:
+                lb.insert('end',f"  第{ci+1}章  {self.chapters[ci]['title'][:14]}  「{hit[:20]}」")
+            preview.config(state='normal'); preview.delete('1.0','end'); preview.config(state='disabled')
             lbl_loc.config(text='')
-            btn_jump.config(state='disabled')
-
-        sv.trace_add('write', do_search)
-        var_case.trace_add('write',  do_search)
-        var_regex.trace_add('write', do_search)
-
+        sv.trace_add('write',do_search); var_case.trace_add('write',do_search); var_regex.trace_add('write',do_search)
         def on_select(event=None):
-            idxs = lb.curselection()
+            idxs=lb.curselection()
             if not idxs: return
-            ci, s, e2, (pre, hit, post) = results[idxs[0]]
-            ch = self.chapters[ci]
-
+            ci,s,e2,(pre,hit,post)=results[idxs[0]]
+            ch=self.chapters[ci]
             preview.config(state='normal'); preview.delete('1.0','end')
-            preview.insert('end', f'第{ci+1}章  {ch["title"]}\n', 'info')
-            preview.insert('end', '…' + pre)
-            preview.insert('end', hit, 'hit')
-            preview.insert('end', post + '…')
+            preview.insert('end',f'第{ci+1}章  {ch["title"]}\n','info')
+            preview.insert('end','…'+pre)
+            preview.insert('end',hit,'hit')
+            preview.insert('end',post+'…')
             preview.config(state='disabled')
-
             lbl_loc.config(text=f'第{ci+1}章 · 位置 {s}')
-            btn_jump.config(state='normal', command=lambda: _jump(ci, s, e2, hit))
-
-        def _jump(ci, s, e2, hit):
-            self.goto_chapter(ci)
-            win.lift()
-            self.root.after(80, lambda: _highlight_in_txt(hit))
-
-        def _highlight_in_txt(hit):
-            self.txt.tag_remove('search_hit', '1.0', 'end')
-            self.txt.tag_config('search_hit', background='#d79921', foreground='#1d2021')
-            start = '1.0'
+            btn_jump.config(command=lambda:_jump(ci,s,e2,hit))
+        def _jump(ci,s,e2,hit):
+            self.goto_chapter(ci); win.lift()
+            self.root.after(80,lambda:_hl(hit))
+        def _hl(hit):
+            self.txt.tag_remove('search_hit','1.0','end')
+            self.txt.tag_config('search_hit',background=accent,foreground='white')
+            start='1.0'
             while True:
-                pos = self.txt.search(hit, start, nocase=not var_case.get(), stopindex='end')
+                pos=self.txt.search(hit,start,nocase=not var_case.get(),stopindex='end')
                 if not pos: break
-                end_pos = f'{pos}+{len(hit)}c'
-                self.txt.tag_add('search_hit', pos, end_pos)
-                self.txt.see(pos)
-                start = end_pos
-
-        lb.bind('<<ListboxSelect>>', on_select)
-        lb.bind('<Double-Button-1>', lambda e: btn_jump.invoke())
-        lb.bind('<Return>',         lambda e: btn_jump.invoke())
-
+                end_pos=f'{pos}+{len(hit)}c'
+                self.txt.tag_add('search_hit',pos,end_pos); self.txt.see(pos); start=end_pos
+        lb.bind('<<ListboxSelect>>',on_select)
+        lb.bind('<Double-Button-1>',lambda e:btn_jump.invoke() if hasattr(btn_jump,'invoke') else None)
         entry.focus()
         try:
-            sel_text = self.txt.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
-            if sel_text and '\n' not in sel_text:
-                sv.set(sel_text)
+            sel_text=self.txt.get(tk.SEL_FIRST,tk.SEL_LAST).strip()
+            if sel_text and '\n' not in sel_text: sv.set(sel_text)
         except: pass
-
-        rx = self.root.winfo_x() + self.root.winfo_width() + 8
-        ry = self.root.winfo_y()
-        win.geometry(f'480x560+{rx}+{ry}')
+        rx=self.root.winfo_x()+self.root.winfo_width()+8; ry=self.root.winfo_y()
+        win.geometry(f'500x580+{rx}+{ry}')
 
     # ─────────────────────────────────────────────────
-    # 章节摘要（Ctrl+M）—— 双模型切换支持
+    # ★ 问题2-方案A：五维度深度摘要 ★
     # ─────────────────────────────────────────────────
     def open_summary(self):
-        """章节摘要——多模式，支持 GLM 和 MiniMax 切换"""
-        if not self.chapters:
-            messagebox.showinfo('提示', '请先打开小说'); return
+        if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
 
         class State:
             ch_body  = self.chapters[self.cur_ch]['body']
@@ -13408,1177 +16156,784 @@ class App:
             result   = ''
             running  = False
 
-        st  = State()
-        _t  = self._cur_theme()
-        _bg, _fg, _bar, _sel = _t['bg'], _t['fg'], _t['bar'], _t['sel']
+        st=State()
+        _t=self._cur_theme(); _bg,_fg,_bar,_sel=_t['bg'],_t['fg'],_t['bar'],_t['sel']
+        _accent=_t.get('accent',_sel)
 
-        dlg = tk.Toplevel(self.root)
-        dlg.title('章节摘要')
-        dlg.geometry('480x540')
-        dlg.resizable(True, True)
-        dlg.attributes('-topmost', True)
-        dlg.configure(bg=_bg)
+        dlg=tk.Toplevel(self.root); dlg.title('章节深度分析')
+        dlg.geometry('520x600'); dlg.resizable(True,True)
+        dlg.attributes('-topmost',True); dlg.configure(bg=_bg)
 
-        # ── 顶部信息栏 ────────────────────────────────
-        top = tk.Frame(dlg, bg=_bar, height=34)
-        top.pack(fill='x'); top.pack_propagate(False)
-        _cc = len(st.ch_body)
-        _pc = len([p for p in st.ch_body.split('\n') if p.strip()])
-        tk.Label(top, text=f'  ✨  {st.ch_title}',
-                 font=('',9,'bold'), bg=_bar, fg=_fg, anchor='w'
-                 ).pack(side='left', fill='x', expand=True, padx=6, pady=7)
-        tk.Label(top, text=f'{_cc} 字  {_pc} 段',
-                 font=('',8), bg=_bar, fg=_sel).pack(side='right', padx=6)
-        tk.Button(top, text='×', relief='flat', font=('',11),
-                  bg=_bar, fg=_fg, bd=0, command=dlg.destroy).pack(side='right', padx=4)
+        top=tk.Frame(dlg,bg=_bar,height=38); top.pack(fill='x'); top.pack_propagate(False)
+        _cc=len(st.ch_body); _pc=len([p for p in st.ch_body.split('\n') if p.strip()])
+        tk.Label(top,text=f'  ✨  {st.ch_title}',font=('',10,'bold'),
+                 bg=_bar,fg=_fg,anchor='w').pack(side='left',fill='x',expand=True,padx=8,pady=9)
+        tk.Label(top,text=f'{_cc}字  {_pc}段',font=('',8),bg=_bar,fg=_sel).pack(side='right',padx=8)
+        tk.Label(top,text='×',font=('',13),bg=_bar,fg=_fg,cursor='hand2',padx=8).pack(side='right')
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x')
 
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+        # ── 分析维度选择（核心升级）────────────────────
+        dim_frame=tk.Frame(dlg,bg=_bar); dim_frame.pack(fill='x',padx=10,pady=6)
+        tk.Label(dim_frame,text='分析维度：',font=('',9,'bold'),bg=_bar,fg=_fg).pack(side='left')
 
-        # ── 选项行 ────────────────────────────────────
-        opt = tk.Frame(dlg, bg=_bar)
-        opt.pack(fill='x', padx=10, pady=6)
-
-        # 长度
-        tk.Label(opt, text='长度', font=('',8,'bold'), bg=_bar, fg=_fg).pack(side='left')
-        v_len = tk.StringVar(value='简短')
-        _len_opts = [
-            ('简短', '简短', '50~80字，一句话总结'),
-            ('标准', '标准', '150字，含人物/情节/转折'),
-            ('详细', '详细', '300字，完整剧情分析'),
+        DIMS = [
+            ('🎯 主题',   '主题思想',   True),
+            ('👤 人物弧', '人物弧',     True),
+            ('🧩 伏笔',   '伏笔悬念',   True),
+            ('⚡ 高潮',   '高潮转折',   True),
+            ('💎 金句',   '金句摘录',   False),
         ]
-        for _val, _lbl, _tip in _len_opts:
-            _rb = tk.Radiobutton(opt, text=_lbl, variable=v_len, value=_val,
-                                 font=('',8), bg=_bar, fg=_fg,
-                                 activebackground=_bar, selectcolor=_bg)
-            _rb.pack(side='left', padx=4)
+        dim_vars = {}
+        for icon_lbl, key, default in DIMS:
+            var = tk.BooleanVar(value=default)
+            dim_vars[key] = var
+            cb = tk.Checkbutton(dim_frame,text=icon_lbl,variable=var,font=('',8),
+                                bg=_bar,fg=_fg,activebackground=_bar,selectcolor=_bg,
+                                cursor='hand2')
+            cb.pack(side='left',padx=3)
 
-        tk.Label(opt, text='   风格', font=('',8,'bold'), bg=_bar, fg=_fg).pack(side='left')
-        v_style = tk.StringVar(value='客观')
-        _style_opts = [('客观','客观'), ('活泼','活泼'), ('学术','学术')]
-        for _val, _lbl in _style_opts:
-            tk.Radiobutton(opt, text=_lbl, variable=v_style, value=_val,
-                           font=('',8), bg=_bar, fg=_fg,
-                           activebackground=_bar, selectcolor=_bg).pack(side='left', padx=4)
+        # 风格行
+        sty_frame=tk.Frame(dlg,bg=_bar); sty_frame.pack(fill='x',padx=10,pady=2)
+        tk.Label(sty_frame,text='篇幅：',font=('',9,'bold'),bg=_bar,fg=_fg).pack(side='left')
+        v_len=tk.StringVar(value='标准')
+        for lbl in ['简短','标准','详细']:
+            tk.Radiobutton(sty_frame,text=lbl,variable=v_len,value=lbl,
+                           font=('',8),bg=_bar,fg=_fg,activebackground=_bar,
+                           selectcolor=_bg).pack(side='left',padx=4)
+        tk.Label(sty_frame,text='  风格：',font=('',9,'bold'),bg=_bar,fg=_fg).pack(side='left')
+        v_sty=tk.StringVar(value='客观')
+        for lbl in ['客观','活泼','学术']:
+            tk.Radiobutton(sty_frame,text=lbl,variable=v_sty,value=lbl,
+                           font=('',8),bg=_bar,fg=_fg,activebackground=_bar,
+                           selectcolor=_bg).pack(side='left',padx=4)
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x')
 
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
-
-        # ── 摘要展示区 ────────────────────────────────
-        mid = tk.Frame(dlg, bg=_bg)
-        mid.pack(fill='both', expand=True)
-        _vsb2 = tk.Scrollbar(mid, width=6)
-        _vsb2.pack(side='right', fill='y')
-        out = tk.Text(mid, font=(self.font_fam, self.font_size+1),
-                      bg=_bg, fg=_fg, insertbackground=_fg, selectbackground=_sel,
-                      relief='flat', padx=20, pady=16, wrap='word',
-                      borderwidth=0, highlightthickness=0, state='disabled',
-                      yscrollcommand=_vsb2.set, spacing1=4, spacing3=4)
-        out.pack(side='left', fill='both', expand=True)
+        mid=tk.Frame(dlg,bg=_bg); mid.pack(fill='both',expand=True)
+        _vsb2=tk.Scrollbar(mid,width=6); _vsb2.pack(side='right',fill='y')
+        out=tk.Text(mid,font=(self.font_fam,self.font_size),
+                    bg=_bg,fg=_fg,insertbackground=_fg,selectbackground=_sel,
+                    relief='flat',padx=18,pady=14,wrap='word',
+                    borderwidth=0,highlightthickness=0,state='disabled',
+                    yscrollcommand=_vsb2.set,spacing1=4,spacing3=4)
+        out.pack(side='left',fill='both',expand=True)
         _vsb2.config(command=out.yview)
         out.tag_config('hint',    foreground=_sel)
         out.tag_config('warn',    foreground='#cc241d')
-        out.tag_config('loading', foreground=_sel, font=(self.font_fam, self.font_size, 'italic'))
-        out.tag_config('result',  foreground=_fg,
-                       font=(self.font_fam, self.font_size+1), spacing1=6, spacing3=4)
+        out.tag_config('loading', foreground=_sel,font=(self.font_fam,self.font_size,'italic'))
+        out.tag_config('result',  foreground=_fg,font=(self.font_fam,self.font_size))
+        out.tag_config('section_title', foreground=_accent,
+                       font=(self.font_fam,self.font_size+1,'bold'))
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x')
 
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+        bot=tk.Frame(dlg,bg=_bar,height=48); bot.pack(fill='x',side='bottom'); bot.pack_propagate(False)
+        btn_gen=tk.Label(bot,text='▶  开始深度分析',font=('',10,'bold'),
+                         bg=_accent,fg='white',padx=18,pady=6,cursor='hand2')
+        btn_gen.pack(side='left',padx=12,pady=10)
+        btn_copy=tk.Label(bot,text='复制',font=('',9),bg=_bar,fg=_fg,padx=8,cursor='hand2')
+        btn_copy.pack(side='left',padx=3,pady=10)
+        btn_note=tk.Label(bot,text='存为笔记',font=('',9),bg=_bar,fg=_fg,padx=8,cursor='hand2')
+        btn_note.pack(side='left',padx=3,pady=10)
+        lbl_st=tk.Label(bot,text='',font=('',8),bg=_bar,fg=_sel); lbl_st.pack(side='right',padx=12)
 
-        # ── 底部操作栏 ────────────────────────────────
-        bot = tk.Frame(dlg, bg=_bar, height=50)
-        bot.pack(fill='x', side='bottom'); bot.pack_propagate(False)
+        def _show(text,tag='result'):
+            out.config(state='normal'); out.delete('1.0','end')
+            out.insert('end',text,tag); out.config(state='disabled'); out.yview_moveto(0.0)
 
-        btn_gen = tk.Button(bot, text='▶  开始生成摘要',
-                            font=('',10,'bold'),
-                            bg=_fg, fg=_bg,
-                            activebackground=_sel, activeforeground=_fg,
-                            relief='flat', bd=0, padx=18, pady=5, cursor='hand2')
-        btn_gen.pack(side='left', padx=12, pady=10)
+        def _show_structured(text):
+            """将多维度分析结果用分段样式渲染"""
+            out.config(state='normal'); out.delete('1.0','end')
+            for line in text.split('\n'):
+                stripped=line.strip()
+                if stripped.startswith('【') and '】' in stripped:
+                    out.insert('end',stripped+'\n','section_title')
+                elif stripped.startswith('▶') or stripped.startswith('•'):
+                    out.insert('end',stripped+'\n','result')
+                else:
+                    out.insert('end',line+'\n','result')
+            out.config(state='disabled'); out.yview_moveto(0.0)
 
-        btn_copy = tk.Button(bot, text='复制', font=('',9),
-                             bg=_bar, fg=_fg, relief='flat', padx=8,
-                             state='disabled', cursor='hand2')
-        btn_copy.pack(side='left', padx=3, pady=10)
+        # ★ 核心：5维度结构化 Prompt ★
+        def _build_5dim_prompt():
+            selected_dims=[k for k,v in dim_vars.items() if v.get()]
+            if not selected_dims: selected_dims=['主题思想','人物弧']
 
-        btn_note = tk.Button(bot, text='存为笔记', font=('',9),
-                             bg=_bar, fg=_fg, relief='flat', padx=8,
-                             state='disabled', cursor='hand2')
-        btn_note.pack(side='left', padx=3, pady=10)
+            _len_map={'简短':'每个维度50字内','标准':'每个维度100-150字','详细':'每个维度200字以上'}
+            _sty_map={'客观':'语言客观简练','活泼':'语言生动，适当使用emoji','学术':'语言严谨，使用文学术语'}
 
-        lbl_st = tk.Label(bot, text='', font=('',8), bg=_bar, fg=_sel)
-        lbl_st.pack(side='right', padx=12)
-
-        # ── 工具函数 ──────────────────────────────────
-        def _show(text, tag='result'):
-            out.config(state='normal')
-            out.delete('1.0', 'end')
-            out.insert('end', text, tag)
-            out.config(state='disabled')
-            out.yview_moveto(0.0)
-
-        def _build_prompt():
-            _len_map = {
-                '简短': '50~80字，用一两句话概括最核心的内容',
-                '标准': '150字左右，包含主要人物、核心情节、关键转折',
-                '详细': '300字左右，完整分析人物行为、情节发展、伏笔与高潮',
+            dim_instructions=[]
+            dim_prompts={
+                '主题思想': '【🎯 主题思想】\n分析本章的核心主题和思想深度，作者想传递什么？',
+                '人物弧':   '【👤 人物弧】\n分析本章人物的内心变化、成长或退化，有哪些关键行为体现了性格？',
+                '伏笔悬念': '【🧩 伏笔悬念】\n指出本章埋下的伏笔或留下的悬念，以及本章揭开了哪些之前的谜题？',
+                '高潮转折': '【⚡ 高潮转折】\n分析本章的情节高潮点、冲突和转折，最戏剧性的时刻是什么？',
+                '金句摘录': '【💎 金句摘录】\n摘录1-3句最精彩的原文句子，并简析其文学价值或情感张力。',
             }
-            _sty_map = {
-                '客观': '语言客观简洁，不带情感色彩',
-                '活泼': '语言生动活泼，适当使用emoji增加趣味',
-                '学术': '语言严谨，条理清晰，使用文学分析术语',
-            }
-            _clip = st.ch_body[:5000]
+            for d in selected_dims:
+                if d in dim_prompts: dim_instructions.append(dim_prompts[d])
+
+            clip=st.ch_body[:5000]
             return (
-                f"请对以下小说章节做摘要。\n"
-                f"要求长度：{_len_map[v_len.get()]}\n"
-                f"要求风格：{_sty_map[v_style.get()]}\n"
-                f"直接输出摘要，不要标题、序号、前缀。\n\n"
-                f"【{st.ch_title}】\n{_clip}"
+                f"请对以下小说章节进行结构化深度分析。\n"
+                f"要求：{_len_map[v_len.get()]}，{_sty_map[v_sty.get()]}。\n"
+                f"按以下维度逐一分析，每个维度单独一段：\n\n"
+                + '\n\n'.join(dim_instructions) +
+                f"\n\n正文：\n【{st.ch_title}】\n{clip}"
             )
 
         def _on_ok(text):
-            st.result  = text
-            st.running = False
-            _show(text, 'result')
-            btn_gen.config(state='normal', text='↺  重新生成')
-            btn_copy.config(state='normal')
-            btn_note.config(state='normal')
-            lbl_st.config(text=f'已生成 · {len(text)} 字')
+            st.result=text; st.running=False
+            _show_structured(text)
+            btn_gen.config(text='↺  重新分析')
+            lbl_st.config(text=f'已生成 · {len(text)}字')
 
         def _on_err(msg):
-            st.running = False
-            btn_gen.config(state='normal', text='▶  开始生成摘要')
-            
+            st.running=False; btn_gen.config(text='▶  开始深度分析')
             if msg.startswith('NO_KEY_'):
-                _model = msg.replace('NO_KEY_', '')
-                _fname = 'api_key_minimax.txt' if _model == 'MiniMax' else 'api_key.txt'
-                _show(
-                    f'⚠  未找到 {_model} 的 API Key\n\n'
-                    f'请在程序同目录新建文件：{_fname}\n'
-                    f'将 API Key 粘贴进去保存即可。',
-                    'warn'
-                )
-            else:
-                _show(f'⚠  生成失败\n\n{msg}', 'warn')
+                _model=msg.replace('NO_KEY_','')
+                _fname='api_key_minimax.txt' if _model=='MiniMax' else 'api_key.txt'
+                _show(f'⚠  未找到 {_model} API Key\n请新建文件：{_fname}','warn')
+            else: _show(f'⚠  生成失败\n\n{msg}','warn')
 
         def _do_gen():
             if st.running: return
-            st.running = True
-            btn_gen.config(state='disabled', text='生成中…')
-            btn_copy.config(state='disabled')
-            btn_note.config(state='disabled')
-            lbl_st.config(text='')
-            _len_label = v_len.get()
-            _sty_label = v_style.get()
-            
-            _model_choice = self.var_ai_model.get()
-            _show(f'[{_model_choice}] 正在生成【{_len_label}·{_sty_label}】摘要，请稍候…', 'loading')
-
+            selected=[k for k,v in dim_vars.items() if v.get()]
+            if not selected: self._toast('请至少选择一个分析维度'); return
+            st.running=True; lbl_st.config(text='')
+            btn_gen.config(text='分析中…')
+            _model_choice=self.var_ai_model.get()
+            _show(f'[{_model_choice}] 正在进行五维度深度分析，请稍候…','loading')
             def worker():
-                import urllib.request as _ureq
-                import urllib.error   as _uerr
-                import json           as _ujson
-
-                if _model_choice == 'MiniMax':
-                    _key = _get_api_key('MiniMax')
-                    _url = 'https://api.minimax.chat/v1/chat/completions'
-                    _model_name = 'abab6.5s-chat'
-                else:
-                    _key = _get_api_key('GLM')
-                    _url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
-                    _model_name = 'glm-4-flash'
-
-                if not _key:
-                    dlg.after(0, lambda: _on_err(f'NO_KEY_{_model_choice}'))
-                    return
-
-                _tok_map = {'简短': 150, '标准': 400, '详细': 700}
-                _maxtok  = _tok_map.get(_len_label, 400)
-                _prompt  = _build_prompt()
-                
-                _payload = _ujson.dumps({
-                    'model':       _model_name,
-                    'max_tokens':  _maxtok,
-                    'temperature': 0.6,
-                    'messages':    [{'role': 'user', 'content': _prompt}],
-                }).encode('utf-8')
-
-                _req = _ureq.Request(
-                    _url,
-                    data    = _payload,
-                    headers = {'Content-Type': 'application/json',
-                               'Authorization': f'Bearer {_key}'},
-                    method  = 'POST',
-                )
+                import urllib.request as _ureq, urllib.error as _uerr, json as _uj
+                _key=_get_api_key(_model_choice)
+                if not _key: dlg.after(0,lambda:_on_err(f'NO_KEY_{_model_choice}')); return
+                _url='https://api.minimax.chat/v1/chat/completions' if _model_choice=='MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+                _model_name='abab6.5s-chat' if _model_choice=='MiniMax' else 'glm-4-flash'
+                _tok_map={'简短':300,'标准':800,'详细':1500}
+                _prompt=_build_5dim_prompt()
+                _payload=_uj.dumps({'model':_model_name,'max_tokens':_tok_map.get(v_len.get(),800),
+                                    'temperature':0.65,'messages':[{'role':'user','content':_prompt}]}).encode('utf-8')
+                _req=_ureq.Request(_url,data=_payload,
+                                   headers={'Content-Type':'application/json','Authorization':f'Bearer {_key}'},
+                                   method='POST')
                 try:
-                    with _ureq.urlopen(_req, timeout=30) as _resp:
-                        _raw   = _resp.read().decode('utf-8')
-                        _pdata = _ujson.loads(_raw)
-                        _text  = _pdata['choices'][0]['message']['content'].strip()
-                    dlg.after(0, lambda t=_text: _on_ok(t))
+                    with _ureq.urlopen(_req,timeout=40) as _resp:
+                        _raw=_resp.read().decode('utf-8')
+                        _text=_uj.loads(_raw)['choices'][0]['message']['content'].strip()
+                    dlg.after(0,lambda t=_text:_on_ok(t))
                 except _uerr.HTTPError as _he:
-                    _hbody = _he.read().decode('utf-8', errors='replace')
-                    try:    _hemsg = _ujson.loads(_hbody).get('error',{}).get('message', _hbody)
-                    except: _hemsg = _hbody[:200]
-                    dlg.after(0, lambda c=str(_he.code), m=_hemsg: _on_err(f'HTTP {c}：{m}'))
-                except Exception as _exc:
-                    dlg.after(0, lambda m=str(_exc): _on_err(m))
+                    _hbody=_he.read().decode('utf-8',errors='replace')
+                    try: _hemsg=_uj.loads(_hbody).get('error',{}).get('message',_hbody)
+                    except: _hemsg=_hbody[:200]
+                    dlg.after(0,lambda c=str(_he.code),m=_hemsg:_on_err(f'HTTP {c}：{m}'))
+                except Exception as _exc: dlg.after(0,lambda m=str(_exc):_on_err(m))
+            threading.Thread(target=worker,daemon=True).start()
 
-            threading.Thread(target=worker, daemon=True).start()
+        btn_gen.bind('<Button-1>',lambda e:_do_gen())
+        btn_copy.bind('<Button-1>',lambda e:(dlg.clipboard_clear(),dlg.clipboard_append(st.result),lbl_st.config(text='已复制 ✓')) if st.result else None)
+        btn_note.bind('<Button-1>',lambda e:self._save_summary_as_note(st,v_len,v_sty,dlg,lbl_st) if st.result else None)
 
-        def _do_copy():
-            if not st.result: return
-            dlg.clipboard_clear(); dlg.clipboard_append(st.result)
-            lbl_st.config(text='已复制 ✓')
-            dlg.after(1800, lambda: lbl_st.config(text=f'已生成 · {len(st.result)} 字'))
+        _show('选择分析维度（可多选），点击「▶ 开始深度分析」。\n\n维度说明：\n'
+              '🎯 主题思想  ·  👤 人物弧  ·  🧩 伏笔悬念\n'
+              '⚡ 高潮转折  ·  💎 金句摘录\n\n'
+              '可组合任意维度，AI会逐维度深度解析。','hint')
 
-        def _do_save():
-            if not st.result: return
-            _nl = self.notes.setdefault(self.book_path, [])
-            _nl.append({'ch': st.ch_idx, 'ch_title': st.ch_title,
-                        'content': f'[AI摘要·{v_len.get()}·{v_style.get()}]\n{st.result}',
-                        'quote': '', 'time': datetime.datetime.now().strftime('%m-%d %H:%M')})
-            _jsave(NOTES_FILE, self.notes)
-            self._update_nav()
-            self._toast('✏ 摘要已存为笔记')
-            lbl_st.config(text='已保存为笔记 ✓')
+        _rx=self.root.winfo_x()+self.root.winfo_width()+10; _ry=self.root.winfo_y()
+        dlg.geometry(f'520x600+{_rx}+{_ry}')
 
-        btn_gen.config(command=_do_gen)
-        btn_copy.config(command=_do_copy)
-        btn_note.config(command=_do_save)
-
-        _show(
-            f'选择长度和风格，点击「▶ 开始生成摘要」。\n'
-            f'当前调用的模型将使用设置中选中的 AI 模型。\n\n'
-            f'· 简短：一两句话抓核心\n'
-            f'· 标准：150字含人物/情节/转折\n'
-            f'· 详细：300字完整分析',
-            'hint'
-        )
-
-        _rx = self.root.winfo_x() + self.root.winfo_width() + 10
-        _ry = self.root.winfo_y()
-        dlg.geometry(f'480x540+{_rx}+{_ry}')
-
+    def _save_summary_as_note(self,st,v_len,v_sty,dlg,lbl_st):
+        _nl=self.notes.setdefault(self.book_path,[])
+        _nl.append({'ch':st.ch_idx,'ch_title':st.ch_title,
+                    'content':f'[AI深度分析·{v_len.get()}·{v_sty.get()}]\n{st.result}',
+                    'quote':'','time':datetime.datetime.now().strftime('%m-%d %H:%M')})
+        _jsave(NOTES_FILE,self.notes); self._update_nav()
+        self._toast('✏ 分析已存为笔记'); lbl_st.config(text='已保存为笔记 ✓')
 
     # ─────────────────────────────────────────────────
-    # AI 章节查找（Ctrl+G）—— 双模型切换支持
+    # ★ 问题3-方案A：TF-IDF 粗筛 + AI 精排 双阶段查找 ★
     # ─────────────────────────────────────────────────
     def open_chapter_finder(self):
-        """用自然语言描述模糊记忆，AI 分析最匹配的章节"""
-        if not self.chapters:
-            messagebox.showinfo('提示', '请先打开小说'); return
+        if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
 
         class State:
-            running = False
-            results = []   # [{'rank':int,'ch_idx':int,'ch_title':str,'reason':str,'score':int}]
+            running=False; results=[]
 
-        st  = State()
-        _t  = self._cur_theme()
-        _bg, _fg, _bar, _sel = _t['bg'], _t['fg'], _t['bar'], _t['sel']
+        st=State()
+        _t=self._cur_theme(); _bg,_fg,_bar,_sel=_t['bg'],_t['fg'],_t['bar'],_t['sel']
+        _accent=_t.get('accent',_sel)
+        total_ch=len(self.chapters)
 
-        dlg = tk.Toplevel(self.root)
-        dlg.title('AI 章节查找')
-        dlg.geometry('500x620')
-        dlg.resizable(True, True)
-        dlg.attributes('-topmost', True)
-        dlg.configure(bg=_bg)
+        dlg=tk.Toplevel(self.root); dlg.title('AI 智能章节查找')
+        dlg.geometry('520x660'); dlg.resizable(True,True)
+        dlg.attributes('-topmost',True); dlg.configure(bg=_bg)
 
-        # ── 顶部标题栏 ────────────────────────────────
-        top = tk.Frame(dlg, bg=_bar, height=34)
-        top.pack(fill='x'); top.pack_propagate(False)
-        tk.Label(top, text='  🔍  AI 章节查找',
-                 font=('',10,'bold'), bg=_bar, fg=_fg).pack(side='left', padx=8, pady=7)
-        tk.Label(top, text=f'共 {len(self.chapters)} 章',
-                 font=('',8), bg=_bar, fg=_sel).pack(side='right', padx=8)
-        tk.Button(top, text='×', relief='flat', font=('',11),
-                  bg=_bar, fg=_fg, bd=0, command=dlg.destroy).pack(side='right', padx=4)
+        top=tk.Frame(dlg,bg=_bar,height=38); top.pack(fill='x'); top.pack_propagate(False)
+        tk.Label(top,text='  🔮  AI 智能章节查找  （两阶段检索）',
+                 font=('',10,'bold'),bg=_bar,fg=_fg).pack(side='left',padx=8,pady=9)
+        tk.Label(top,text=f'{total_ch}章',font=('',8),bg=_bar,fg=_sel).pack(side='right',padx=8)
+        tk.Label(top,text='×',font=('',13),bg=_bar,fg=_fg,cursor='hand2',padx=8).pack(side='right')
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x')
 
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
+        inp_wrap=tk.Frame(dlg,bg=_bg); inp_wrap.pack(fill='x',padx=12,pady=(10,0))
+        tk.Label(inp_wrap,text='描述你记得的情节、场景、人物、对话或感受：',
+                 font=('',9),bg=_bg,fg=_fg,anchor='w').pack(fill='x')
+        inp=tk.Text(inp_wrap,font=(self.font_fam,self.font_size),
+                    bg=_bar,fg=_fg,insertbackground=_fg,relief='flat',padx=10,pady=8,
+                    wrap='word',height=4,borderwidth=1,highlightthickness=1,
+                    highlightbackground=_sel,highlightcolor=_accent)
+        inp.pack(fill='x',pady=(4,0))
+        _PH='例如：主角第一次失败，独自在雨中走路，背景音乐很悲伤……'
+        inp.insert('1.0',_PH); inp.config(fg=_sel)
+        def _fi(e):
+            if inp.get('1.0','end-1c')==_PH: inp.delete('1.0','end'); inp.config(fg=_fg)
+        def _fo(e):
+            if not inp.get('1.0','end-1c').strip(): inp.insert('1.0',_PH); inp.config(fg=_sel)
+        inp.bind('<FocusIn>',_fi); inp.bind('<FocusOut>',_fo)
 
-        # ── 输入区 ────────────────────────────────────
-        inp_wrap = tk.Frame(dlg, bg=_bg)
-        inp_wrap.pack(fill='x', padx=12, pady=(10, 0))
+        # ── 两阶段参数配置（核心展示）────────────────
+        cfg_frame=tk.Frame(inp_wrap,bg=_bg); cfg_frame.pack(fill='x',pady=(8,0))
 
-        tk.Label(inp_wrap,
-                 text='描述你记得的情节、场景、人物对话或感受：',
-                 font=('',9), bg=_bg, fg=_fg, anchor='w').pack(fill='x')
+        # 阶段一参数
+        tk.Label(cfg_frame,text='阶段①粗筛：',font=('',8,'bold'),bg=_bg,fg=_fg).pack(side='left')
+        tk.Label(cfg_frame,text='TF-IDF取前',font=('',8),bg=_bg,fg=_sel).pack(side='left')
+        v_tfidf_n=tk.IntVar(value=20)
+        sp1=ttk.Combobox(cfg_frame,textvariable=v_tfidf_n,values=[10,15,20,30,50],
+                         width=3,font=('',8),state='readonly')
+        sp1.pack(side='left',padx=2)
+        tk.Label(cfg_frame,text='章',font=('',8),bg=_bg,fg=_sel).pack(side='left')
 
-        inp = tk.Text(inp_wrap,
-                      font=(self.font_fam, self.font_size),
-                      bg=_bar, fg=_fg, insertbackground=_fg,
-                      relief='flat', padx=10, pady=8,
-                      wrap='word', height=4,
-                      borderwidth=1, highlightthickness=1,
-                      highlightbackground=_sel, highlightcolor=_fg)
-        inp.pack(fill='x', pady=(4, 0))
+        tk.Label(cfg_frame,text='   阶段②AI精排：',font=('',8,'bold'),bg=_bg,fg=_fg).pack(side='left')
+        tk.Label(cfg_frame,text='返回',font=('',8),bg=_bg,fg=_sel).pack(side='left')
+        v_cnt=tk.IntVar(value=3)
+        sp2=ttk.Combobox(cfg_frame,textvariable=v_cnt,values=[1,3,5,7],
+                         width=3,font=('',8),state='readonly')
+        sp2.pack(side='left',padx=2)
+        tk.Label(cfg_frame,text='个结果',font=('',8),bg=_bg,fg=_sel).pack(side='left')
 
-        _PH = '例如：有一章写到主角第一次失败，很沮丧，在雨中独自走路……'
-        inp.insert('1.0', _PH); inp.config(fg=_sel)
-        def _focus_in(e):
-            if inp.get('1.0','end-1c') == _PH:
-                inp.delete('1.0','end'); inp.config(fg=_fg)
-        def _focus_out(e):
-            if not inp.get('1.0','end-1c').strip():
-                inp.insert('1.0', _PH); inp.config(fg=_sel)
-        inp.bind('<FocusIn>',  _focus_in)
-        inp.bind('<FocusOut>', _focus_out)
+        # 阶段进度指示器
+        stage_frame=tk.Frame(inp_wrap,bg=_bg); stage_frame.pack(fill='x',pady=(6,0))
+        lbl_s1=tk.Label(stage_frame,text='① 本地TF-IDF粗筛',font=('',8),bg=_bg,fg=_sel)
+        lbl_s1.pack(side='left')
+        tk.Label(stage_frame,text=' → ',font=('',9),bg=_bg,fg=_sel).pack(side='left')
+        lbl_s2=tk.Label(stage_frame,text='② AI语义精排',font=('',8),bg=_bg,fg=_sel)
+        lbl_s2.pack(side='left')
+        tk.Label(stage_frame,text=' → ',font=('',9),bg=_bg,fg=_sel).pack(side='left')
+        lbl_s3=tk.Label(stage_frame,text='输出结果',font=('',8),bg=_bg,fg=_sel)
+        lbl_s3.pack(side='left')
 
-        # ── 【核心优化】范围与参数配置行 ───────────────
-        opt_frame = tk.Frame(inp_wrap, bg=_bg)
-        opt_frame.pack(fill='x', pady=(8,0))
-        
-        # 1. 搜索范围选择器
-        tk.Label(opt_frame, text='搜索范围：', font=('',8), bg=_bg, fg=_fg).pack(side='left')
-        
-        CHUNK_SIZE = 500
-        total_ch = len(self.chapters)
-        range_opts = []
-        for i in range(0, total_ch, CHUNK_SIZE):
-            end = min(i + CHUNK_SIZE, total_ch)
-            range_opts.append(f"第{i+1}-{end}章")
-        
-        if total_ch > CHUNK_SIZE:
-            range_opts.append("全书 (仅匹配标题不含正文)")
-            
-        v_range = tk.StringVar(value=range_opts[0] if range_opts else "全部")
-        cb_range = ttk.Combobox(opt_frame, textvariable=v_range, values=range_opts,
-                                width=18, font=('',8), state='readonly')
-        cb_range.pack(side='left', padx=2)
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x',pady=(10,0))
 
-        # 2. 返回数量
-        tk.Label(opt_frame, text='  返回数：', font=('',8), bg=_bg, fg=_fg).pack(side='left', padx=(6,0))
-        v_cnt = tk.IntVar(value=3)
-        cb_cnt = ttk.Combobox(opt_frame, textvariable=v_cnt, values=[1, 3, 5],
-                              width=3, font=('',8), state='readonly')
-        cb_cnt.pack(side='left', padx=2)
+        pane=tk.PanedWindow(dlg,orient='vertical',bg=_bg,sashwidth=5,sashrelief='flat',sashpad=2)
+        pane.pack(fill='both',expand=True)
+        list_frame=tk.Frame(pane,bg=_bg); pane.add(list_frame,height=180)
+        _lsb=tk.Scrollbar(list_frame,width=6); _lsb.pack(side='right',fill='y')
+        result_lb=tk.Listbox(list_frame,font=('',10),relief='flat',bg=_bg,fg=_fg,
+                             selectbackground=_sel,selectforeground=_fg,
+                             borderwidth=0,highlightthickness=0,activestyle='none',
+                             yscrollcommand=_lsb.set)
+        result_lb.pack(fill='both',expand=True); _lsb.config(command=result_lb.yview)
+        detail_frame=tk.Frame(pane,bg=_bg); pane.add(detail_frame,height=150)
+        detail=tk.Text(detail_frame,font=(self.font_fam,self.font_size),
+                       bg=_bar,fg=_fg,insertbackground=_fg,relief='flat',
+                       padx=14,pady=10,wrap='word',borderwidth=0,highlightthickness=0,state='disabled')
+        detail.pack(fill='both',expand=True)
+        detail.tag_config('title',font=(self.font_fam,self.font_size,'bold'))
+        detail.tag_config('score',foreground=_sel)
+        detail.tag_config('phase',foreground=_accent,font=(self.font_fam,self.font_size-1,'italic'))
+        detail.tag_config('hint',foreground=_sel,font=(self.font_fam,self.font_size,'italic'))
+        detail.tag_config('warn',foreground='#cc241d')
+        tk.Frame(dlg,height=1,bg=_sel).pack(fill='x')
 
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x', pady=(10,0))
+        bot=tk.Frame(dlg,bg=_bar,height=46); bot.pack(fill='x',side='bottom'); bot.pack_propagate(False)
+        btn_find=tk.Label(bot,text='🔮  开始两阶段检索',font=('',10,'bold'),
+                          bg=_accent,fg='white',padx=16,pady=5,cursor='hand2')
+        btn_find.pack(side='left',padx=12,pady=8)
+        btn_goto=tk.Label(bot,text='↩ 跳转到此章',font=('',9),
+                          bg=_bar,fg=_fg,padx=8,cursor='hand2')
+        btn_goto.pack(side='left',padx=4,pady=8)
+        lbl_st2=tk.Label(bot,text='',font=('',8),bg=_bar,fg=_sel); lbl_st2.pack(side='right',padx=12)
 
-        # ── 结果展示区（上：列表 / 下：详情） ─────────
-        pane = tk.PanedWindow(dlg, orient='vertical', bg=_bg,
-                              sashwidth=5, sashrelief='flat', sashpad=2)
-        pane.pack(fill='both', expand=True, padx=0, pady=0)
+        def _detail_show(text,tag='hint'):
+            detail.config(state='normal'); detail.delete('1.0','end')
+            detail.insert('end',text,tag); detail.config(state='disabled')
 
-        list_frame = tk.Frame(pane, bg=_bg)
-        pane.add(list_frame, height=180)
-        _lsb = tk.Scrollbar(list_frame, width=6)
-        _lsb.pack(side='right', fill='y')
-        result_lb = tk.Listbox(list_frame, font=('',10), relief='flat',
-                               bg=_bg, fg=_fg, selectbackground=_sel, selectforeground=_fg,
-                               borderwidth=0, highlightthickness=0,
-                               activestyle='none', yscrollcommand=_lsb.set)
-        result_lb.pack(fill='both', expand=True)
-        _lsb.config(command=result_lb.yview)
-
-        detail_frame = tk.Frame(pane, bg=_bg)
-        pane.add(detail_frame, height=140)
-        detail = tk.Text(detail_frame, font=(self.font_fam, self.font_size),
-                         bg=_bar, fg=_fg, insertbackground=_fg, relief='flat',
-                         padx=14, pady=10, wrap='word', borderwidth=0, highlightthickness=0, state='disabled')
-        detail.pack(fill='both', expand=True)
-        detail.tag_config('title',  font=(self.font_fam, self.font_size, 'bold'))
-        detail.tag_config('score',  foreground=_sel)
-        detail.tag_config('reason', foreground=_fg)
-        detail.tag_config('hint',   foreground=_sel, font=(self.font_fam, self.font_size, 'italic'))
-        detail.tag_config('warn',   foreground='#cc241d')
-
-        tk.Frame(dlg, height=1, bg=_sel).pack(fill='x')
-
-        # ── 底部操作栏 ────────────────────────────────
-        bot = tk.Frame(dlg, bg=_bar, height=46)
-        bot.pack(fill='x', side='bottom'); bot.pack_propagate(False)
-
-        btn_find = tk.Button(bot, text='🔍  开始分析', font=('',10,'bold'),
-                             bg=_fg, fg=_bg, activebackground=_sel, activeforeground=_fg,
-                             relief='flat', bd=0, padx=16, pady=4, cursor='hand2')
-        btn_find.pack(side='left', padx=12, pady=8)
-
-        btn_goto = tk.Button(bot, text='↩ 跳转到此章', font=('',9),
-                             bg=_bar, fg=_fg, relief='flat', padx=8,
-                             state='disabled', cursor='hand2')
-        btn_goto.pack(side='left', padx=4, pady=8)
-
-        lbl_st2 = tk.Label(bot, text='', font=('',8), bg=_bar, fg=_sel)
-        lbl_st2.pack(side='right', padx=12)
-
-        # ── 内部函数 ──────────────────────────────────
-        def _show_detail(text, tag='hint'):
-            detail.config(state='normal'); detail.delete('1.0', 'end')
-            detail.insert('end', text, tag); detail.config(state='disabled')
-
-        def _show_detail_rich(title, score, reason):
-            detail.config(state='normal'); detail.delete('1.0', 'end')
-            detail.insert('end', f'{title}\n', 'title')
-            detail.insert('end', f'匹配度：{"★" * min(score,5)}{"☆" * max(0,5-score)}  {score}/5\n', 'score')
-            detail.insert('end', f'\n{reason}', 'reason')
+        def _detail_rich(title,score,reason,phase_info=''):
+            detail.config(state='normal'); detail.delete('1.0','end')
+            detail.insert('end',f'{title}\n','title')
+            detail.insert('end',f'匹配度：{"★"*min(score,5)}{"☆"*max(0,5-score)}  {score}/5\n','score')
+            if phase_info: detail.insert('end',f'{phase_info}\n','phase')
+            detail.insert('end',f'\n{reason}')
             detail.config(state='disabled')
 
         def _on_select(event=None):
-            idxs = result_lb.curselection()
+            idxs=result_lb.curselection()
             if not idxs or not st.results: return
-            _item = st.results[idxs[0]]
-            _show_detail_rich(_item['ch_title'], _item['score'], _item['reason'])
-            btn_goto.config(state='normal', command=lambda i=_item['ch_idx']: (dlg.destroy(), self.goto_chapter(i)))
+            item=st.results[idxs[0]]
+            _detail_rich(item['ch_title'],item['score'],item['reason'],
+                         f'TF-IDF排名: 第{item.get("tfidf_rank","?")}位 → AI精排确认')
+            btn_goto.config(command=lambda i=item['ch_idx']:(dlg.destroy(),self.goto_chapter(i)))
 
-        result_lb.bind('<<ListboxSelect>>', _on_select)
-        result_lb.bind('<Double-Button-1>', lambda e: btn_goto.invoke() if btn_goto['state']=='normal' else None)
+        result_lb.bind('<<ListboxSelect>>',_on_select)
+        result_lb.bind('<Double-Button-1>',lambda e:btn_goto.invoke() if hasattr(btn_goto,'command') else None)
 
-        def _on_find_success(results):
-            st.running = False; st.results = results
-            btn_find.config(state='normal', text='🔍  重新分析')
-            result_lb.delete(0, 'end')
+        def _stage_highlight(stage):
+            """高亮当前阶段指示器"""
+            lbl_s1.config(fg=_accent if stage==1 else _sel)
+            lbl_s2.config(fg=_accent if stage==2 else _sel)
+            lbl_s3.config(fg=_accent if stage==3 else _sel)
+
+        def _on_success(results):
+            st.running=False; st.results=results
+            btn_find.config(text='🔮  重新检索')
+            result_lb.delete(0,'end')
+            _stage_highlight(3)
             if not results:
-                _show_detail('未找到匹配章节，请尝试扩大范围或换一种描述。', 'hint')
-                lbl_st2.config(text='未找到结果'); return
-            for _r in results:
-                _stars = '★' * min(_r['score'], 5)
-                result_lb.insert('end', f"  第{_r['ch_idx']+1}章  {_r['ch_title'][:24]}  {_stars}")
+                _detail_show('未找到匹配章节，请换一种描述方式。','hint')
+                lbl_st2.config(text='未找到'); return
+            for r in results:
+                stars='★'*min(r['score'],5)
+                result_lb.insert('end',f"  第{r['ch_idx']+1}章  {r['ch_title'][:22]}  {stars}")
             lbl_st2.config(text=f'找到 {len(results)} 个匹配')
             result_lb.selection_set(0); _on_select()
 
-        def _on_find_error(msg):
-            st.running = False
-            btn_find.config(state='normal', text='🔍  开始分析')
-            
+        def _on_error(msg):
+            st.running=False; btn_find.config(text='🔮  开始两阶段检索')
+            _stage_highlight(0)
             if msg.startswith('NO_KEY_'):
-                _model = msg.replace('NO_KEY_', '')
-                _fname = 'api_key_minimax.txt' if _model == 'MiniMax' else 'api_key.txt'
-                _show_detail(f'⚠  未找到 {_model} 的 API Key\n请在程序同目录新建 {_fname}', 'warn')
-            else:
-                _show_detail(f'⚠  分析失败\n\n{msg}', 'warn')
+                _model=msg.replace('NO_KEY_','')
+                _fname='api_key_minimax.txt' if _model=='MiniMax' else 'api_key.txt'
+                _detail_show(f'⚠  未找到 {_model} API Key\n请新建 {_fname}','warn')
+            else: _detail_show(f'⚠  分析失败\n\n{msg}','warn')
             lbl_st2.config(text='')
 
         def _do_find():
-            _query = inp.get('1.0','end-1c').strip()
-            if not _query or _query == _PH: inp.focus(); return
+            _query=inp.get('1.0','end-1c').strip()
+            if not _query or _query==_PH: inp.focus(); return
             if st.running: return
-            st.running = True; st.results = []; result_lb.delete(0, 'end')
-            btn_find.config(state='disabled', text='分析中…')
-            btn_goto.config(state='disabled'); lbl_st2.config(text='')
-            
-            _selected_range = v_range.get()
-            _model_choice = self.var_ai_model.get()
-            _show_detail(f'[{_model_choice}] 正在分析 [{_selected_range}]，请稍候…', 'hint')
-            _top_n = v_cnt.get()
+            st.running=True; st.results=[]; result_lb.delete(0,'end')
+            btn_find.config(text='检索中…')
+            btn_goto.config(command=None); lbl_st2.config(text='')
+            _tfidf_n=v_tfidf_n.get(); _top_n=v_cnt.get()
+            _model_choice=self.var_ai_model.get()
 
-            # 构建 prompt 的上下文范围
-            _toc_lines = []
-            _start_idx, _end_idx = 0, total_ch
-            
-            if "全书" in _selected_range:
-                for _i, _ch in enumerate(self.chapters):
-                    _toc_lines.append(f"[{_i}]《{_ch['title']}》")
-            else:
-                import re
-                m = re.search(r'第(\d+)-(\d+)章', _selected_range)
-                if m:
-                    _start_idx = int(m.group(1)) - 1
-                    _end_idx = int(m.group(2))
-                for _i in range(_start_idx, min(_end_idx, total_ch)):
-                    _ch = self.chapters[_i]
-                    _preview = _ch['body'][:50].replace('\n', ' ').strip()
-                    _toc_lines.append(f"[{_i}]《{_ch['title']}》：{_preview}…")
-            
-            _toc_text = '\n'.join(_toc_lines)
+            # 阶段1：本地 TF-IDF 粗筛（主线程，极快）
+            _stage_highlight(1)
+            _detail_show(f'⏳ 阶段①：本地TF-IDF扫描 {total_ch} 章，提取前 {_tfidf_n} 个候选…','hint')
+            dlg.update()
+
+            candidate_idxs=tfidf_rank_chapters(_query,self.chapters,top_n=_tfidf_n)
+            lbl_st2.config(text=f'阶段①完成：{len(candidate_idxs)}个候选')
+
+            # 阶段2：AI 精排（异步线程）
+            _stage_highlight(2)
+            _detail_show(f'⏳ 阶段②：[{_model_choice}] AI精排 {len(candidate_idxs)} 个候选章节…','hint')
+
+            # 构建候选章节TOC（含正文预览，信息更丰富）
+            toc_lines=[]
+            for i in candidate_idxs:
+                ch=self.chapters[i]
+                preview=ch['body'][:80].replace('\n',' ').strip()
+                toc_lines.append(f"[{i}]《{ch['title']}》：{preview}…")
+            toc_text='\n'.join(toc_lines)
 
             def worker():
-                import urllib.request as _ureq
-                import urllib.error   as _uerr
-                import json           as _ujson
-
-                if _model_choice == 'MiniMax':
-                    _key = _get_api_key('MiniMax')
-                    _url = 'https://api.minimax.chat/v1/chat/completions'
-                    _model_name = 'abab6.5s-chat'
-                else:
-                    _key = _get_api_key('GLM')
-                    _url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
-                    _model_name = 'glm-4-flash'
-
-                if not _key:
-                    dlg.after(0, lambda: _on_find_error(f'NO_KEY_{_model_choice}')); return
-
-                _prompt = (
-                    f"我在读一本小说，对某个章节有模糊印象，请帮我找出最匹配的章节。\n\n"
+                import urllib.request as _ureq, urllib.error as _uerr, json as _uj
+                _key=_get_api_key(_model_choice)
+                if not _key: dlg.after(0,lambda:_on_error(f'NO_KEY_{_model_choice}')); return
+                _url='https://api.minimax.chat/v1/chat/completions' if _model_choice=='MiniMax' else 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+                _model_name='abab6.5s-chat' if _model_choice=='MiniMax' else 'glm-4-flash'
+                _prompt=(
+                    f"我在读一本小说，对某章节有模糊印象，请从候选章节中找出最匹配的。\n\n"
                     f"【我的描述】\n{_query}\n\n"
-                    f"【候选章节列表】(格式为 [序号]《标题》：预览)\n{_toc_text}\n\n"
-                    f"请从候选列表中选出最匹配的 {_top_n} 个，"
-                    f"以 JSON 数组格式返回，每项包含：\n"
-                    f"  ch_idx（必须严格使用上面列表括号[]中的数字序号，整数）\n"
+                    f"【候选章节（已由TF-IDF预筛选，共{len(candidate_idxs)}个）】\n{toc_text}\n\n"
+                    f"请从候选中选出最匹配的 {_top_n} 个，以 JSON 数组返回，每项包含：\n"
+                    f"  ch_idx（必须严格使用 [] 中的数字，整数）\n"
                     f"  ch_title（章节标题）\n"
                     f"  score（匹配度1-5分，整数）\n"
-                    f"  reason（50字内说明匹配原因）\n\n"
-                    f"只返回 JSON，不要其他文字，格式示例：\n"
-                    f'[{{"ch_idx":2,"ch_title":"第三章","score":4,"reason":"..."}}]'
+                    f"  reason（60字内说明匹配原因）\n\n"
+                    f"只返回 JSON，不要其他文字：\n"
+                    f'[{{"ch_idx":0,"ch_title":"...","score":4,"reason":"..."}}]'
                 )
-
-                _payload = _ujson.dumps({
-                    'model':       _model_name,
-                    'max_tokens':  600,
-                    'temperature': 0.2,
-                    'messages':    [{'role': 'user', 'content': _prompt}],
-                }).encode('utf-8')
-
-                _req = _ureq.Request(
-                    _url,
-                    data    = _payload,
-                    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {_key}'},
-                    method  = 'POST',
-                )
+                _payload=_uj.dumps({'model':_model_name,'max_tokens':600,'temperature':0.2,
+                                    'messages':[{'role':'user','content':_prompt}]}).encode('utf-8')
+                _req=_ureq.Request(_url,data=_payload,
+                                   headers={'Content-Type':'application/json','Authorization':f'Bearer {_key}'},
+                                   method='POST')
                 try:
-                    with _ureq.urlopen(_req, timeout=40) as _resp:
-                        _raw   = _resp.read().decode('utf-8')
-                        _pdata = _ujson.loads(_raw)
-                        _text  = _pdata['choices'][0]['message']['content'].strip()
-
-                    _text = re.sub(r'^```[a-z]*\s*', '', _text, flags=re.I)
-                    _text = re.sub(r'\s*```$', '', _text)
-                    _parsed = _ujson.loads(_text)
-
-                    _results = []
-                    for _item in _parsed[:_top_n]:
-                        _ci = int(_item.get('ch_idx', 0))
-                        if 0 <= _ci < len(self.chapters):
-                            _results.append({
-                                'rank':     len(_results)+1,
-                                'ch_idx':   _ci,
-                                'ch_title': self.chapters[_ci]['title'],
-                                'score':    max(1, min(5, int(_item.get('score', 3)))),
-                                'reason':   str(_item.get('reason', ''))[:120],
+                    with _ureq.urlopen(_req,timeout=40) as _resp:
+                        _raw=_resp.read().decode('utf-8')
+                        _text=_uj.loads(_raw)['choices'][0]['message']['content'].strip()
+                    _text=re.sub(r'^```[a-z]*\s*','',_text,flags=re.I)
+                    _text=re.sub(r'\s*```$','',_text)
+                    _parsed=_uj.loads(_text)
+                    results=[]
+                    for idx_r,item in enumerate(_parsed[:_top_n]):
+                        _ci=int(item.get('ch_idx',0))
+                        if 0<=_ci<len(self.chapters):
+                            # 记录 TF-IDF 排名位置
+                            tfidf_rank=candidate_idxs.index(_ci)+1 if _ci in candidate_idxs else '?'
+                            results.append({
+                                'rank':len(results)+1,
+                                'ch_idx':_ci,
+                                'ch_title':self.chapters[_ci]['title'],
+                                'score':max(1,min(5,int(item.get('score',3)))),
+                                'reason':str(item.get('reason',''))[:120],
+                                'tfidf_rank':tfidf_rank,
                             })
-                    dlg.after(0, lambda r=_results: _on_find_success(r))
-
+                    dlg.after(0,lambda r=results:_on_success(r))
                 except _uerr.HTTPError as _he:
-                    _hbody = _he.read().decode('utf-8', errors='replace')
-                    try:    _hemsg = _ujson.loads(_hbody).get('error',{}).get('message', _hbody)
-                    except: _hemsg = _hbody[:150]
-                    dlg.after(0, lambda c=str(_he.code), m=_hemsg: _on_find_error(f'HTTP {c}：{m}'))
-                except Exception as _exc:
-                    dlg.after(0, lambda m=str(_exc): _on_find_error(m))
+                    _hbody=_he.read().decode('utf-8',errors='replace')
+                    try: _hemsg=_uj.loads(_hbody).get('error',{}).get('message',_hbody)
+                    except: _hemsg=_hbody[:150]
+                    dlg.after(0,lambda c=str(_he.code),m=_hemsg:_on_error(f'HTTP {c}：{m}'))
+                except Exception as _exc: dlg.after(0,lambda m=str(_exc):_on_error(m))
 
-            import threading
-            threading.Thread(target=worker, daemon=True).start()
+            threading.Thread(target=worker,daemon=True).start()
 
-        btn_find.config(command=_do_find)
-        inp.bind('<Control-Return>', lambda e: _do_find())
+        btn_find.bind('<Button-1>',lambda e:_do_find())
+        inp.bind('<Control-Return>',lambda e:_do_find())
 
-        _show_detail('选择【搜索范围】，输入回忆的情节，AI 将精准定位。\n💡 范围越小，API 请求越快，匹配越精准。', 'hint')
-        _rx = self.root.winfo_x() + self.root.winfo_width() + 10
-        _ry = self.root.winfo_y()
-        dlg.geometry(f'500x620+{_rx}+{_ry}')
+        _detail_show(
+            '两阶段检索说明：\n\n'
+            '① 本地 TF-IDF 粗筛（零API消耗，毫秒级）\n'
+            '   全文扫描，提取关键词最相关的候选章节\n\n'
+            '② AI 语义精排（仅分析候选章节，Token消耗少）\n'
+            '   深度理解情节语义，输出精准排名\n\n'
+            '提示：描述越具体（人物名+情节+场景），准确率越高。','hint')
+
+        _rx=self.root.winfo_x()+self.root.winfo_width()+10; _ry=self.root.winfo_y()
+        dlg.geometry(f'520x660+{_rx}+{_ry}')
+
     # ─────────────────────────────────────────────────
-    # 角色画像缓存机制 (App 类方法)
+    # ★ 问题1-方案B：角色画像（关键词索引全文扫描）★
     # ─────────────────────────────────────────────────
     def _get_or_create_profile(self, role_name, update_ui_cb):
-        """获取或生成角色画像，大幅降低后续对话的 Token 消耗"""
-        safe_title = re.sub(r'[\\/*?:"<>|]', "", self.book_title)
-        safe_role = re.sub(r'[\\/*?:"<>|]', "", role_name)
-        profile_path = os.path.join(PROFILES_DIR, f"{safe_title}_{safe_role}.txt")
-        
-        # 1. 命中缓存，直接读取返回
+        safe_title=re.sub(r'[\\/*?:"<>|]','',self.book_title)
+        safe_role=re.sub(r'[\\/*?:"<>|]','',role_name)
+        profile_path=os.path.join(PROFILES_DIR,f'{safe_title}_{safe_role}.txt')
+
         if os.path.exists(profile_path):
-            with open(profile_path, 'r', encoding='utf-8') as f:
-                return f.read()
-                
-        # 2. 未命中缓存，需要提取上下文生成画像
-        update_ui_cb(f"系统", f"正在深度分析【{role_name}】的性格与语言习惯，首次分析需要几十秒，请稍候...")
-        
-        # 提取当前章节及前面几章的文本（防止剧透，且限制长度防越界）
-        start_ch = max(0, self.cur_ch - 5)
-        context = "\n".join([c['body'] for c in self.chapters[start_ch:self.cur_ch + 1]])
-        context = context[-8000:] # 取最近的8000字作为分析材料
-        
-        sys_prompt = (
-            f"你是一个专业的文学角色分析师。请根据以下截取的小说内容，提取角色【{role_name}】的深度画像，包括：\n"
-            f"1. 核心性格特征\n"
-            f"2. 标志性的说话口癖与语气（举例说明）\n"
-            f"3. 对其他关键人物的态度与人际关系\n"
-            f"字数严格控制在500字以内，直接输出画像，不需要任何寒暄。"
+            with open(profile_path,'r',encoding='utf-8') as f: return f.read()
+
+        update_ui_cb('系统', f'正在全文扫描【{role_name}】相关段落，构建深度画像…')
+
+        # ★ 方案B核心：全文关键词索引提取，而非只用当前章节 ★
+        role_context=extract_role_context(role_name,self.chapters,self.cur_ch,max_chars=8000)
+        total_mentions=sum(1 for ch in self.chapters if role_name in ch['body'])
+
+        sys_prompt=(
+            f"你是专业的文学角色分析师。根据以下从全书中提取的、包含角色【{role_name}】的段落，"
+            f"构建该角色的深度画像。\n"
+            f"（角色在全书{len(self.chapters)}章中共出现约{total_mentions}章，已提取最关键段落）\n\n"
+            f"画像内容要求（500字以内，直接输出，无需寒暄）：\n"
+            f"1. 核心性格特征与人物弧光（成长或堕落轨迹）\n"
+            f"2. 标志性说话口癖、语气与惯用语（举原文例句）\n"
+            f"3. 对关键人物的态度与人际关系图谱\n"
+            f"4. 重要经历、内心创伤或执念"
         )
-        
-        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"小说片段：\n{context}"}]
-        success, result = _robust_api_call(self.var_ai_model.get(), messages, max_retries=2, timeout=60)
-        
+        messages=[{"role":"system","content":sys_prompt},
+                  {"role":"user","content":f"角色相关段落：\n{role_context}"}]
+        success,result=_robust_api_call(self.var_ai_model.get(),messages,max_retries=2,timeout=60)
         if success:
-            with open(profile_path, 'w', encoding='utf-8') as f:
-                f.write(result)
+            with open(profile_path,'w',encoding='utf-8') as f: f.write(result)
             return result
-        else:
-            return f"ERROR:{result}"
+        else: return f'ERROR:{result}'
 
     # ─────────────────────────────────────────────────
-    # 角色对话窗口 (App 类方法)
+    # 角色对话
     # ─────────────────────────────────────────────────
     def open_role_chat(self):
-        if not self.chapters:
-            messagebox.showinfo('提示', '请先打开小说'); return
+        if not self.chapters: messagebox.showinfo('提示','请先打开小说'); return
+        t=self._cur_theme(); bg,fg,bar,sel=t['bg'],t['fg'],t['bar'],t['sel']
+        accent=t.get('accent',sel)
+        win=tk.Toplevel(self.root); win.title('与角色跨时空对话')
+        win.geometry('460x620'); win.attributes('-topmost',True); win.configure(bg=bg)
+        chat_history=[]
 
-        t = self._cur_theme()
-        bg, fg, bar, sel = t['bg'], t['fg'], t['bar'], t['sel']
+        top=tk.Frame(win,bg=bar,height=42); top.pack(fill='x'); top.pack_propagate(False)
+        tk.Label(top,text='  💬 对话角色：',font=('',9,'bold'),bg=bar,fg=fg).pack(side='left',padx=4,pady=11)
+        role_var=tk.StringVar(value='')
+        role_ent=tk.Entry(top,textvariable=role_var,width=14,font=('',10),
+                          bg=bg,fg=fg,insertbackground=fg,relief='flat',
+                          borderwidth=1,highlightthickness=1,
+                          highlightbackground=sel,highlightcolor=accent)
+        role_ent.pack(side='left',padx=4,pady=8,ipady=3)
 
-        win = tk.Toplevel(self.root)
-        win.title('与角色跨时空对话')
-        win.geometry('450x600')
-        win.attributes('-topmost', True)
-        win.configure(bg=bg)
+        # 刷新画像按钮
+        def refresh_profile():
+            role=role_var.get().strip()
+            if not role: return
+            safe_t=re.sub(r'[\\/*?:"<>|]','',self.book_title)
+            safe_r=re.sub(r'[\\/*?:"<>|]','',role)
+            pf=os.path.join(PROFILES_DIR,f'{safe_t}_{safe_r}.txt')
+            if os.path.exists(pf): os.remove(pf)
+            append_msg('系统',f'已清除【{role}】的缓存画像，下次发送将重新分析。','sys')
+        ref_lbl=tk.Label(top,text='↺刷新画像',font=('',8),bg=bar,fg=fg,padx=6,cursor='hand2')
+        ref_lbl.bind('<Button-1>',lambda e:refresh_profile())
+        ref_lbl.pack(side='left',padx=2)
+        tk.Label(top,text='×',font=('',13),bg=bar,fg=fg,cursor='hand2',padx=8).pack(side='right')
 
-        chat_history = [] # 维护多轮对话的上下文
+        chat_frame=tk.Frame(win,bg=bg); chat_frame.pack(fill='both',expand=True,padx=6,pady=6)
+        chat_display=scrolledtext.ScrolledText(
+            chat_frame,font=(self.font_fam,self.font_size),
+            bg=bg,fg=fg,state='disabled',wrap='word',
+            borderwidth=0,highlightthickness=0,spacing1=4,spacing3=4)
+        chat_display.pack(fill='both',expand=True)
+        chat_display.tag_config('name',font=(self.font_fam,self.font_size,'bold'),foreground=accent)
+        chat_display.tag_config('user',font=(self.font_fam,self.font_size,'bold'),foreground=sel)
+        chat_display.tag_config('sys',font=(self.font_fam,self.font_size-1,'italic'),foreground='#888')
 
-        # ── 顶部 ──
-        top = tk.Frame(win, bg=bar, height=40)
-        top.pack(fill='x')
-        tk.Label(top, text='对话角色:', font=('', 9, 'bold'), bg=bar, fg=fg).pack(side='left', padx=10)
-        
-        role_var = tk.StringVar(value="")
-        role_ent = tk.Entry(top, textvariable=role_var, width=12, font=('', 9), bg=bg, fg=fg, insertbackground=fg)
-        role_ent.pack(side='left', padx=5, pady=8)
-        
-        # ── 聊天显示区 ──
-        chat_frame = tk.Frame(win, bg=bg)
-        chat_frame.pack(fill='both', expand=True, padx=8, pady=8)
-        
-        chat_display = scrolledtext.ScrolledText(
-            chat_frame, font=(self.font_fam, self.font_size), 
-            bg=bg, fg=fg, state='disabled', wrap='word', borderwidth=0, highlightthickness=0, spacing1=4, spacing3=4
-        )
-        chat_display.pack(fill='both', expand=True)
-        chat_display.tag_config('name', font=(self.font_fam, self.font_size, 'bold'), foreground=sel)
-        chat_display.tag_config('sys', font=(self.font_fam, self.font_size - 1, 'italic'), foreground='#888')
+        bot=tk.Frame(win,bg=bar); bot.pack(fill='x',side='bottom')
+        msg_ent=tk.Entry(bot,font=(self.font_fam,self.font_size),
+                         bg=bg,fg=fg,insertbackground=fg,relief='flat',
+                         borderwidth=1,highlightthickness=1,
+                         highlightbackground=sel,highlightcolor=accent)
+        msg_ent.pack(fill='x',padx=10,pady=8,side='left',expand=True,ipady=5)
+        btn_send=tk.Label(bot,text='发送',font=('',10,'bold'),
+                          bg=accent,fg='white',padx=14,pady=6,cursor='hand2')
+        btn_send.pack(side='right',padx=10,pady=8)
 
-        # ── 底部输入区 ──
-        bot = tk.Frame(win, bg=bar)
-        bot.pack(fill='x', side='bottom')
-        
-        msg_ent = tk.Entry(bot, font=(self.font_fam, self.font_size), bg=bg, fg=fg, insertbackground=fg, relief='flat')
-        msg_ent.pack(fill='x', padx=10, pady=10, side='left', expand=True, ipady=4)
-
-        btn_send = tk.Button(bot, text="发送", font=('', 9, 'bold'), bg=fg, fg=bg, activebackground=sel, relief='flat', cursor='hand2')
-        btn_send.pack(side='right', padx=10, pady=10, ipadx=10)
-
-        # ── 核心逻辑 ──
-        def append_msg(who, text, tag='name'):
+        def append_msg(who,text,tag='name'):
             chat_display.config(state='normal')
-            if tag == 'sys':
-                chat_display.insert('end', f"{who}: {text}\n\n", 'sys')
+            if tag=='sys': chat_display.insert('end',f'[{who}] {text}\n\n','sys')
+            elif tag=='user':
+                chat_display.insert('end',f'[{who}] ','user')
+                chat_display.insert('end',f'{text}\n\n')
             else:
-                chat_display.insert('end', f"[{who}] ", 'name')
-                chat_display.insert('end', f"{text}\n\n")
-            chat_display.config(state='disabled')
-            chat_display.see('end')
+                chat_display.insert('end',f'[{who}] ','name')
+                chat_display.insert('end',f'{text}\n\n')
+            chat_display.config(state='disabled'); chat_display.see('end')
 
-        def set_ui_state(enabled=True):
-            """防止连点引起的并发错误"""
-            state = 'normal' if enabled else 'disabled'
-            msg_ent.config(state=state)
-            btn_send.config(state=state)
-            role_ent.config(state=state)
+        def set_ui(enabled=True):
+            s='normal' if enabled else 'disabled'
+            msg_ent.config(state=s); role_ent.config(state=s)
+            btn_send.config(bg=accent if enabled else sel)
             if enabled: msg_ent.focus()
 
         def do_send(e=None):
-            role = role_var.get().strip()
-            user_text = msg_ent.get().strip()
+            role=role_var.get().strip(); user_text=msg_ent.get().strip()
             if not role or not user_text: return
-            if btn_send['state'] == 'disabled': return # 防抖
-            
-            msg_ent.delete(0, 'end')
-            set_ui_state(False)
-            append_msg("我", user_text)
+            if msg_ent['state']=='disabled': return
+            msg_ent.delete(0,'end'); set_ui(False)
+            append_msg('我',user_text,'user')
 
             def ai_worker():
-                # 1. 获取或生成角色画像（重点优化：节约Token并保证准确性）
-                profile = self._get_or_create_profile(role, append_msg)
-                if profile.startswith("ERROR:"):
-                    win.after(0, lambda: append_msg("系统", f"获取角色画像失败 -> {profile}", 'sys'))
-                    win.after(0, lambda: set_ui_state(True))
-                    return
-
-                # 2. 构建 System Prompt
-                system_prompt = (
+                profile=self._get_or_create_profile(role,append_msg)
+                if profile.startswith('ERROR:'):
+                    win.after(0,lambda:append_msg('系统',f'获取角色画像失败：{profile}','sys'))
+                    win.after(0,lambda:set_ui(True)); return
+                system_prompt=(
                     f"你正在沉浸式扮演小说角色：【{role}】。\n"
-                    f"【你的深度画像】:\n{profile}\n\n"
+                    f"【你的深度画像（基于全书分析）】:\n{profile}\n\n"
                     f"【扮演规则】:\n"
-                    f"1. 完全沉浸在角色中，绝不承认自己是AI。语言风格、口癖必须与画像一致。\n"
-                    f"2. 严禁剧透未来的事情，你只知道过去和现在发生的事。\n"
-                    f"3. 保持一问一答的简短对话感，每次回复不超过3句话。\n"
-                    f"4. 绝不使用侮辱、歧视、血腥暴力等违规词汇，保持友好或符合人设的克制交流。"
+                    f"1. 完全沉浸角色，绝不承认自己是AI。语言风格、口癖必须与画像一致。\n"
+                    f"2. 严禁剧透未来，你只知道画像中涉及的过去与现在。\n"
+                    f"3. 保持一问一答的对话感，每次不超过3句话。\n"
+                    f"4. 禁止使用侮辱、暴力等违规词汇。"
                 )
-                
-                messages = [{"role": "system", "content": system_prompt}]
+                messages=[{"role":"system","content":system_prompt}]
                 messages.extend(chat_history)
-                messages.append({"role": "user", "content": user_text})
+                messages.append({"role":"user","content":user_text})
+                success,resp=_robust_api_call(self.var_ai_model.get(),messages)
+                win.after(0,lambda:_handle(success,resp,user_text))
 
-                # 3. 发起请求
-                success, resp = _robust_api_call(self.var_ai_model.get(), messages)
-                
-                win.after(0, lambda: _handle_resp(success, resp, user_text))
-
-            def _handle_resp(success, resp, user_text):
+            def _handle(success,resp,user_text):
                 if success:
-                    # 维护上下文窗口（保留最近8条记录，避免溢出）
-                    chat_history.append({"role": "user", "content": user_text})
-                    chat_history.append({"role": "assistant", "content": resp})
-                    if len(chat_history) > 8:
-                        chat_history.pop(0); chat_history.pop(0)
-                        
-                    append_msg(role, resp)
+                    chat_history.append({"role":"user","content":user_text})
+                    chat_history.append({"role":"assistant","content":resp})
+                    if len(chat_history)>10: chat_history.pop(0); chat_history.pop(0)
+                    append_msg(role,resp)
                 else:
-                    if resp == "NO_KEY":
-                        append_msg("系统", "请先在设置所在目录配置 API Key 文件。", 'sys')
-                    else:
-                        append_msg("系统", f"对话失败 -> {resp}", 'sys')
-                
-                set_ui_state(True)
+                    append_msg('系统','NO_KEY'==resp and '请配置 API Key 文件。' or f'对话失败：{resp}','sys')
+                set_ui(True)
 
-            threading.Thread(target=ai_worker, daemon=True).start()
+            threading.Thread(target=ai_worker,daemon=True).start()
 
-        btn_send.config(command=do_send)
-        msg_ent.bind('<Return>', do_send)
-
-        append_msg("系统", "已就绪。输入角色名，然后发送消息即可开始对话。系统会自动分析并记住该角色的性格。", 'sys')
+        btn_send.bind('<Button-1>',do_send); msg_ent.bind('<Return>',do_send)
+        append_msg('系统','已就绪。输入角色名 → 发送消息开始对话。\n首次分析会全文扫描角色相关段落，更准确。','sys')
         role_ent.focus()
 
     # ─────────────────────────────────────────────────
-    # ★ 终极高保真老板键 (Ctrl+D) —— Word 蓝 & A4 纸比例 ★
+    # 老板键相关（保持原版逻辑，界面保持高仿Word）
     # ─────────────────────────────────────────────────
     def open_boss_editor(self):
-        """设置栏按钮：编辑伪装文档内容"""
-        t = self._cur_theme()
-        bg, fg, bar = t['bg'], t['fg'], t['bar']
- 
-        win = tk.Toplevel(self.root)
-        win.title('编辑伪装文档内容')
-        win.geometry('560x480')
-        win.attributes('-topmost', True)
-        win.configure(bg=bg)
- 
-        # 标题栏
-        hdr = tk.Frame(win, bg='#2b579a', height=30)
-        hdr.pack(fill='x'); hdr.pack_propagate(False)
-        tk.Label(hdr, text='  📝  编辑 Word 伪装文档内容',
-                 font=('', 9, 'bold'), bg='#2b579a', fg='white').pack(side='left', padx=6, pady=5)
-        tk.Button(hdr, text='×', relief='flat', font=('', 11), bg='#2b579a', fg='white',
-                  command=win.destroy).pack(side='right', padx=6)
- 
-        tk.Label(win, text='以下内容会显示在老板键伪装的 Word 文档中（Ctrl+D 触发）：',
-                 font=('', 9), bg=bg, fg=fg).pack(anchor='w', padx=12, pady=(10, 4))
- 
-        # 文本编辑区
-        ta = tk.Text(win, font=('Microsoft YaHei', 10) if sys.platform == 'win32' else ('', 11),
-                     bg='white', fg='#1a1a1a',
-                     relief='flat', padx=12, pady=10, wrap='word',
-                     borderwidth=1, highlightthickness=1,
-                     highlightbackground='#c8c8c8', highlightcolor='#2b579a')
-        ta.pack(fill='both', expand=True, padx=12, pady=4)
- 
-        # 读取已保存内容
+        t=self._cur_theme(); bg,fg,bar=t['bg'],t['fg'],t['bar']
+        win=tk.Toplevel(self.root); win.title('编辑伪装文档内容')
+        win.geometry('560x480'); win.attributes('-topmost',True); win.configure(bg=bg)
+        hdr=tk.Frame(win,bg='#2b579a',height=32); hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Label(hdr,text='  📝  编辑 Word 伪装文档内容',
+                 font=('',9,'bold'),bg='#2b579a',fg='white').pack(side='left',padx=8,pady=6)
+        tk.Label(hdr,text='×',font=('',12),bg='#2b579a',fg='white',cursor='hand2',padx=8).pack(side='right')
+        tk.Label(win,text='此内容将显示在 Ctrl+D 触发的 Word 伪装界面中：',
+                 font=('',9),bg=bg,fg=fg).pack(anchor='w',padx=12,pady=(10,4))
+        ta=tk.Text(win,font=('Microsoft YaHei',10) if sys.platform=='win32' else ('',11),
+                   bg='white',fg='#1a1a1a',relief='flat',padx=12,pady=10,wrap='word',
+                   borderwidth=1,highlightthickness=1,
+                   highlightbackground='#c8c8c8',highlightcolor='#2b579a')
+        ta.pack(fill='both',expand=True,padx=12,pady=4)
         if os.path.exists(BOSS_FILE):
-            with open(BOSS_FILE, encoding='utf-8') as f:
-                ta.insert('1.0', f.read())
-        else:
-            ta.insert('1.0', _DEFAULT_BOSS_TEXT)
- 
-        # 底部按钮
-        bf = tk.Frame(win, bg=bar); bf.pack(fill='x', padx=12, pady=8)
-        tk.Label(bf, text='提示：标题行用"■ "开头，小标题用"▸ "开头',
-                 font=('', 8), bg=bar, fg='#888').pack(side='left')
- 
+            with open(BOSS_FILE,encoding='utf-8') as f: ta.insert('1.0',f.read())
+        else: ta.insert('1.0',_DEFAULT_BOSS_TEXT)
+        bf=tk.Frame(win,bg=bar); bf.pack(fill='x',padx=12,pady=8)
+        tk.Label(bf,text='提示：用 "■ " 开头一级标题，"▸ " 开头二级标题',
+                 font=('',8),bg=bar,fg='#888').pack(side='left')
         def save_and_close():
-            content = ta.get('1.0', 'end-1c')
-            with open(BOSS_FILE, 'w', encoding='utf-8') as f:
-                f.write(content)
-            # 如果老板模式已开启，立即刷新文档内容
-            if self._is_boss_mode and hasattr(self, '_boss_text_widget'):
+            content=ta.get('1.0','end-1c')
+            with open(BOSS_FILE,'w',encoding='utf-8') as f: f.write(content)
+            if self._is_boss_mode and hasattr(self,'_boss_text_widget'):
                 self._refresh_boss_doc(content)
-            self._toast('📝 伪装文档已保存')
-            win.destroy()
- 
-        tk.Button(bf, text='保存', font=('', 9, 'bold'),
-                  bg='#2b579a', fg='white', relief='flat', padx=16, pady=4,
-                  command=save_and_close).pack(side='right', padx=4)
-        tk.Button(bf, text='取消', font=('', 9),
-                  bg=bar, fg=fg, relief='flat', padx=12, pady=4,
-                  command=win.destroy).pack(side='right')
- 
-        win.bind('<Control-Return>', lambda e: save_and_close())
- 
-    # ── 内部辅助：读取文档内容 ────────────────────────────────────────────────
+            self._toast('📝 伪装文档已保存'); win.destroy()
+        save_lbl=tk.Label(bf,text='保存',font=('',9,'bold'),bg='#2b579a',fg='white',
+                          padx=16,pady=4,cursor='hand2')
+        save_lbl.bind('<Button-1>',lambda e:save_and_close())
+        save_lbl.pack(side='right',padx=4)
+        cancel_lbl=tk.Label(bf,text='取消',font=('',9),bg=bar,fg=fg,padx=12,pady=4,cursor='hand2')
+        cancel_lbl.bind('<Button-1>',lambda e:win.destroy())
+        cancel_lbl.pack(side='right')
+        win.bind('<Control-Return>',lambda e:save_and_close())
+
     def _get_boss_content(self):
         if os.path.exists(BOSS_FILE):
             try:
-                with open(BOSS_FILE, encoding='utf-8') as f:
-                    return f.read()
-            except:
-                pass
+                with open(BOSS_FILE,encoding='utf-8') as f: return f.read()
+            except: pass
         return _DEFAULT_BOSS_TEXT
- 
-    def _refresh_boss_doc(self, content=None):
-        """把内容渲染进 A4 纸 Text widget（支持简单标记语法）"""
-        if not hasattr(self, '_boss_text_widget'):
-            return
-        if content is None:
-            content = self._get_boss_content()
- 
-        tw = self._boss_text_widget
-        tw.config(state='normal')
-        tw.delete('1.0', 'end')
- 
-        # 简单标记渲染
+
+    def _refresh_boss_doc(self,content=None):
+        if not hasattr(self,'_boss_text_widget'): return
+        if content is None: content=self._get_boss_content()
+        tw=self._boss_text_widget
+        tw.config(state='normal'); tw.delete('1.0','end')
         for line in content.split('\n'):
-            stripped = line.strip()
-            if stripped.startswith('■ '):
-                # 一级标题（蓝色加粗）
-                tw.insert('end', stripped[2:] + '\n', 'h1')
-            elif stripped.startswith('▸ '):
-                # 二级标题
-                tw.insert('end', stripped[2:] + '\n', 'h2')
-            elif stripped.startswith('---'):
-                # 水平线（用空行模拟）
-                tw.insert('end', '\n', 'normal')
-            else:
-                tw.insert('end', line + '\n', 'normal')
- 
-        tw.config(state='disabled')
-        tw.yview_moveto(0.0)
- 
+            stripped=line.strip()
+            if stripped.startswith('■ '): tw.insert('end',stripped[2:]+'\n','h1')
+            elif stripped.startswith('▸ '): tw.insert('end',stripped[2:]+'\n','h2')
+            elif stripped.startswith('---'): tw.insert('end','\n','normal')
+            else: tw.insert('end',line+'\n','normal')
+        tw.config(state='disabled'); tw.yview_moveto(0.0)
+
     def _build_boss_mode_ui(self):
-        """构建高仿 Word 界面（仅创建一次，之后复用）"""
-        WORD_BLUE  = '#2b579a'
-        RIBBON_BG  = '#f3f2f1'
-        DOC_GRAY   = '#b0b0b0'
-        BORDER_CLR = '#c8c8c8'
- 
-        self.boss_frame = tk.Frame(self.root, bg=DOC_GRAY)
- 
-        # ── 1. 标题栏 ────────────────────────────────────────────────────────
-        title_bar = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=28)
+        WORD_BLUE='#2b579a'; RIBBON_BG='#f3f2f1'; DOC_GRAY='#b0b0b0'; BORDER_CLR='#c8c8c8'
+        self.boss_frame=tk.Frame(self.root,bg=DOC_GRAY)
+        title_bar=tk.Frame(self.boss_frame,bg=WORD_BLUE,height=28)
         title_bar.pack(fill='x'); title_bar.pack_propagate(False)
- 
-        tk.Label(title_bar, text='💾  ✔  ↶  ↷',
-                 font=('', 9), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=8)
-        tk.Label(title_bar, text='项目可行性研究报告.docx - Word',
-                 font=('', 9, 'bold'), bg=WORD_BLUE, fg='white').pack(side='left', expand=True)
- 
-        # 窗口控制按钮
-        for sym, hov in [('─', WORD_BLUE), ('⬜', WORD_BLUE), ('✕', '#c42b1c')]:
-            b = tk.Label(title_bar, text=sym, font=('', 10), bg=WORD_BLUE, fg='white',
-                         width=4, cursor='hand2')
+        tk.Label(title_bar,text='💾  ✔  ↶  ↷',font=('',9),bg=WORD_BLUE,fg='#c7d8f0').pack(side='left',padx=8)
+        tk.Label(title_bar,text='项目可行性研究报告.docx - Word',
+                 font=('',9,'bold'),bg=WORD_BLUE,fg='white').pack(side='left',expand=True)
+        for sym,hov in [('─',WORD_BLUE),('⬜',WORD_BLUE),('✕','#c42b1c')]:
+            b=tk.Label(title_bar,text=sym,font=('',10),bg=WORD_BLUE,fg='white',width=4,cursor='hand2')
             b.pack(side='right')
-            b.bind('<Enter>', lambda e, w=b, c=hov: w.config(bg=c))
-            b.bind('<Leave>', lambda e, w=b: w.config(bg=WORD_BLUE))
- 
-        # ── 2. 菜单栏 ────────────────────────────────────────────────────────
-        menu_bar = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=24)
+            b.bind('<Enter>',lambda e,w=b,c=hov:w.config(bg=c))
+            b.bind('<Leave>',lambda e,w=b:w.config(bg=WORD_BLUE))
+        menu_bar=tk.Frame(self.boss_frame,bg=WORD_BLUE,height=24)
         menu_bar.pack(fill='x'); menu_bar.pack_propagate(False)
- 
-        menus = ['文件', '开始', '插入', '设计', '布局', '引用', '邮件', '审阅', '视图', '帮助']
-        for i, m in enumerate(menus):
-            is_active = (i == 1)  # "开始" 高亮
-            bg_c = 'white'        if is_active else WORD_BLUE
-            fg_c = WORD_BLUE      if is_active else '#d0dff5'
-            lbl = tk.Label(menu_bar, text=m, font=('', 9), bg=bg_c, fg=fg_c,
-                           padx=10, pady=2, cursor='hand2')
+        menus=['文件','开始','插入','设计','布局','引用','邮件','审阅','视图','帮助']
+        for i,m in enumerate(menus):
+            is_active=(i==1); bg_c='white' if is_active else WORD_BLUE; fg_c=WORD_BLUE if is_active else '#d0dff5'
+            lbl=tk.Label(menu_bar,text=m,font=('',9),bg=bg_c,fg=fg_c,padx=10,pady=2,cursor='hand2')
             lbl.pack(side='left')
             if not is_active:
-                lbl.bind('<Enter>', lambda e, w=lbl: w.config(bg='#3f6bb5', fg='white'))
-                lbl.bind('<Leave>', lambda e, w=lbl: w.config(bg=WORD_BLUE, fg='#d0dff5'))
- 
-        # ── 3. Ribbon ─────────────────────────────────────────────────────────
-        ribbon = tk.Frame(self.boss_frame, bg='white',
-                          highlightbackground=BORDER_CLR, highlightthickness=1)
+                lbl.bind('<Enter>',lambda e,w=lbl:w.config(bg='#3f6bb5',fg='white'))
+                lbl.bind('<Leave>',lambda e,w=lbl:w.config(bg=WORD_BLUE,fg='#d0dff5'))
+        ribbon=tk.Frame(self.boss_frame,bg='white',highlightbackground=BORDER_CLR,highlightthickness=1)
         ribbon.pack(fill='x')
- 
-        ribbon_inner = tk.Frame(ribbon, bg='white')
-        ribbon_inner.pack(fill='x', padx=4, pady=0)
- 
-        def _sep():
-            tk.Frame(ribbon_inner, width=1, bg=BORDER_CLR).pack(
-                side='left', fill='y', pady=4, padx=2)
- 
-        def _rg_label(parent, text):
-            tk.Label(parent, text=text, font=('', 8), fg='#666', bg='white').pack(side='bottom', pady=1)
- 
-        def _rb(parent, icon, label, large=False):
-            f = tk.Frame(parent, bg='white', cursor='hand2')
-            f.pack(side='left', padx=1, pady=2)
-            sz = 18 if large else 13
-            tk.Label(f, text=icon, font=('', sz), bg='white').pack()
-            tk.Label(f, text=label, font=('', 8), fg='#333', bg='white').pack()
-            f.bind('<Enter>', lambda e: f.config(bg='#e9ecf3'))
-            f.bind('<Leave>', lambda e: f.config(bg='white'))
-            for w in f.winfo_children():
-                w.bind('<Enter>', lambda e, fw=f: fw.config(bg='#e9ecf3'))
-                w.bind('<Leave>', lambda e, fw=f: fw.config(bg='white'))
- 
-        # 剪贴板组
-        g1 = tk.Frame(ribbon_inner, bg='white'); g1.pack(side='left', fill='y', padx=2)
-        g1c = tk.Frame(g1, bg='white'); g1c.pack(fill='both', expand=True)
-        _rb(g1c, '📋', '粘贴', large=True)
-        g1r = tk.Frame(g1c, bg='white'); g1r.pack(side='left')
-        for ic, lb in [('✂', '剪切'), ('⧉', '复制'), ('🖊', '格式刷')]:
-            f2 = tk.Frame(g1r, bg='white', cursor='hand2'); f2.pack(anchor='w')
-            tk.Label(f2, text=ic, font=('', 11), bg='white').pack(side='left', padx=2)
-            tk.Label(f2, text=lb, font=('', 8), bg='white', fg='#333').pack(side='left')
-            f2.bind('<Enter>', lambda e, fw=f2: fw.config(bg='#e9ecf3'))
-            f2.bind('<Leave>', lambda e, fw=f2: fw.config(bg='white'))
-        _rg_label(g1, '剪贴板')
-        _sep()
- 
-        # 字体组
-        g2 = tk.Frame(ribbon_inner, bg='white'); g2.pack(side='left', fill='y', padx=2)
-        font_nm = 'Microsoft YaHei' if sys.platform == 'win32' else 'Arial'
-        row1 = tk.Frame(g2, bg='white'); row1.pack(anchor='w', pady=1)
-        tk.Label(row1, text='等线 (中文正文)  ▾', font=('', 9), bg='white',
-                 relief='groove', bd=1, padx=4, width=16).pack(side='left')
-        tk.Label(row1, text='11 ▾', font=('', 9), bg='white',
-                 relief='groove', bd=1, padx=4, width=4).pack(side='left', padx=2)
-        tk.Label(row1, text='A↑ A↓', font=('', 9), bg='white').pack(side='left', padx=2)
-        row2 = tk.Frame(g2, bg='white'); row2.pack(anchor='w', pady=1)
-        for txt, kw in [('B', {'font':('',11,'bold')}), ('I', {'font':('',11,'italic')}),
-                        ('U̲', {'font':('',11)}), ('ab̶', {'font':('',9)}),
-                        ('A', {'font':('',11)}), ('A', {'font':('',11), 'fg':'#c00'})]:
-            tk.Label(row2, text=txt, bg='white', relief='flat', padx=3,
-                     cursor='hand2', **kw).pack(side='left')
-        _rg_label(g2, '字体')
-        _sep()
- 
-        # 段落组
-        g3 = tk.Frame(ribbon_inner, bg='white'); g3.pack(side='left', fill='y', padx=2)
-        r3a = tk.Frame(g3, bg='white'); r3a.pack(anchor='w', pady=1)
-        for t in ['≡▾', '½≡▾', '|', '☰', '≡', '☲', '☳']:
-            tk.Label(r3a, text=t, font=('', 10), bg='white', padx=2).pack(side='left')
-        r3b = tk.Frame(g3, bg='white'); r3b.pack(anchor='w', pady=1)
-        for t in ['⬛', '↕', '↵', '¶']:
-            tk.Label(r3b, text=t, font=('', 10), bg='white', padx=2).pack(side='left')
-        _rg_label(g3, '段落')
-        _sep()
- 
-        # 样式组
-        g4 = tk.Frame(ribbon_inner, bg='white'); g4.pack(side='left', fill='y', padx=2)
-        styles_f = tk.Frame(g4, bg='white'); styles_f.pack(fill='both', expand=True, pady=2)
-        style_defs = [
-            ('正文',  '#000', '#f0f4fb', True),
-            ('标题 1', WORD_BLUE, 'white', False),
-            ('标题 2', WORD_BLUE, 'white', False),
-        ]
-        for s_lbl, s_fg, s_bg, s_active in style_defs:
-            sf = tk.Frame(styles_f, bg=s_bg,
-                          highlightbackground=BORDER_CLR if s_active else 'white',
-                          highlightthickness=1, cursor='hand2', width=50)
-            sf.pack(side='left', padx=1)
-            tk.Label(sf, text='AaBbCc', font=('Times New Roman', 9),
-                     fg=s_fg, bg=s_bg, padx=4, pady=1).pack()
-            tk.Label(sf, text=s_lbl, font=('', 8), fg=s_fg, bg=s_bg, padx=4).pack()
-        _rg_label(g4, '样式')
-        _sep()
- 
-        # 编辑组
-        g5 = tk.Frame(ribbon_inner, bg='white'); g5.pack(side='left', fill='y', padx=2)
-        for ic, lb in [('🔍', '查找 ▾'), ('⇄', '替换'), ('↖', '选择 ▾')]:
-            f5 = tk.Frame(g5, bg='white', cursor='hand2'); f5.pack(anchor='w', pady=1)
-            tk.Label(f5, text=ic, font=('', 11), bg='white').pack(side='left', padx=2)
-            tk.Label(f5, text=lb, font=('', 9), bg='white', fg='#333').pack(side='left')
-        _rg_label(g5, '编辑')
- 
-        # Ribbon 底部提示（Ctrl+D 退出）
-        hint = tk.Frame(self.boss_frame, bg=RIBBON_BG, height=14)
+        ribbon_inner=tk.Frame(ribbon,bg='white'); ribbon_inner.pack(fill='x',padx=4,pady=0)
+        hint=tk.Frame(self.boss_frame,bg=RIBBON_BG,height=14)
         hint.pack(fill='x'); hint.pack_propagate(False)
-        tk.Label(hint, text='按 Ctrl+D 恢复阅读', font=('', 8), bg=RIBBON_BG, fg='#999').pack(side='right', padx=8)
- 
-        # ── 4. 标尺 ────────────────────────────────────────────────────────────
-        ruler = tk.Canvas(self.boss_frame, height=16, bg='#f0eeeb',
-                          highlightthickness=0)
+        tk.Label(hint,text='按 Ctrl+D 恢复阅读',font=('',8),bg=RIBBON_BG,fg='#999').pack(side='right',padx=8)
+        ruler=tk.Canvas(self.boss_frame,height=16,bg='#f0eeeb',highlightthickness=0)
         ruler.pack(fill='x')
-        # 绘制简单标尺刻度
-        self.boss_frame.after(50, lambda: self._draw_ruler(ruler))
- 
-        # ── 5. 文档主区域（A4 纸）─────────────────────────────────────────────
-        doc_outer = tk.Frame(self.boss_frame, bg=DOC_GRAY)
-        doc_outer.pack(fill='both', expand=True)
- 
-        # 右侧滚动条
-        doc_vsb = tk.Scrollbar(doc_outer, orient='vertical', width=14)
-        doc_vsb.pack(side='right', fill='y')
- 
-        doc_canvas = tk.Canvas(doc_outer, bg=DOC_GRAY,
-                               highlightthickness=0,
-                               yscrollcommand=doc_vsb.set)
-        doc_canvas.pack(side='left', fill='both', expand=True)
-        doc_vsb.config(command=doc_canvas.yview)
- 
-        # A4 纸 Frame（白色，固定宽度居中）
-        a4_outer = tk.Frame(doc_canvas, bg=DOC_GRAY)
-        doc_canvas.create_window((0, 0), window=a4_outer, anchor='nw')
- 
-        # 纸张容器（阴影感用边框模拟）
-        a4_shadow = tk.Frame(a4_outer, bg='#888', padx=2, pady=2)
-        a4_shadow.pack(pady=20)
- 
-        a4 = tk.Frame(a4_shadow, bg='white', width=680)
-        a4.pack()
-        a4.pack_propagate(False)
- 
-        # A4 内容 Text widget
-        doc_font = ('Times New Roman', 11) if sys.platform != 'linux' else ('', 11)
-        tw = tk.Text(a4, font=doc_font,
-                     bg='white', fg='#1a1a1a',
-                     relief='flat', padx=80, pady=72,
-                     wrap='word', state='disabled',
-                     borderwidth=0, highlightthickness=0,
-                     spacing1=4, spacing2=2, spacing3=6,
-                     cursor='arrow')
-        tw.pack(fill='both', expand=True)
- 
-        # 文字样式标签
-        h1_font = ('Times New Roman', 16, 'bold') if sys.platform != 'linux' else ('', 16, 'bold')
-        h2_font = ('Times New Roman', 13, 'bold') if sys.platform != 'linux' else ('', 13, 'bold')
-        tw.tag_config('h1',     font=h1_font, foreground=WORD_BLUE,
-                      spacing1=14, spacing3=6)
-        tw.tag_config('h2',     font=h2_font, foreground=WORD_BLUE,
-                      spacing1=10, spacing3=4)
-        tw.tag_config('normal', font=doc_font, foreground='#1a1a1a',
-                      lmargin1=0, lmargin2=0, spacing1=2, spacing3=2)
- 
-        self._boss_text_widget = tw
-        self._boss_doc_canvas  = doc_canvas
-        self._boss_a4_outer    = a4_outer
- 
-        # 滚轮绑定
+        self.boss_frame.after(50,lambda:self._draw_ruler(ruler))
+        doc_outer=tk.Frame(self.boss_frame,bg=DOC_GRAY); doc_outer.pack(fill='both',expand=True)
+        doc_vsb=tk.Scrollbar(doc_outer,orient='vertical',width=14); doc_vsb.pack(side='right',fill='y')
+        doc_canvas=tk.Canvas(doc_outer,bg=DOC_GRAY,highlightthickness=0,yscrollcommand=doc_vsb.set)
+        doc_canvas.pack(side='left',fill='both',expand=True); doc_vsb.config(command=doc_canvas.yview)
+        a4_outer=tk.Frame(doc_canvas,bg=DOC_GRAY)
+        doc_canvas.create_window((0,0),window=a4_outer,anchor='nw')
+        a4_shadow=tk.Frame(a4_outer,bg='#888',padx=2,pady=2); a4_shadow.pack(pady=20)
+        a4=tk.Frame(a4_shadow,bg='white',width=680); a4.pack(); a4.pack_propagate(False)
+        doc_font=('Times New Roman',11) if sys.platform!='linux' else ('',11)
+        tw=tk.Text(a4,font=doc_font,bg='white',fg='#1a1a1a',relief='flat',padx=80,pady=72,
+                   wrap='word',state='disabled',borderwidth=0,highlightthickness=0,
+                   spacing1=4,spacing2=2,spacing3=6,cursor='arrow')
+        tw.pack(fill='both',expand=True)
+        h1_font=('Times New Roman',16,'bold') if sys.platform!='linux' else ('',16,'bold')
+        h2_font=('Times New Roman',13,'bold') if sys.platform!='linux' else ('',13,'bold')
+        tw.tag_config('h1',font=h1_font,foreground='#2b579a',spacing1=14,spacing3=6)
+        tw.tag_config('h2',font=h2_font,foreground='#2b579a',spacing1=10,spacing3=4)
+        tw.tag_config('normal',font=doc_font,foreground='#1a1a1a',spacing1=2,spacing3=2)
+        self._boss_text_widget=tw; self._boss_doc_canvas=doc_canvas; self._boss_a4_outer=a4_outer
         def _boss_scroll(e):
-            delta = -1 if (e.delta > 0 or e.num == 4) else 1
-            doc_canvas.yview_scroll(delta * 3, 'units')
-        doc_canvas.bind('<MouseWheel>', _boss_scroll)
-        doc_canvas.bind('<Button-4>',   _boss_scroll)
-        doc_canvas.bind('<Button-5>',   _boss_scroll)
-        tw.bind('<MouseWheel>', _boss_scroll)
- 
-        # Canvas 自适应大小
+            delta=-1 if (e.delta>0 or e.num==4) else 1
+            doc_canvas.yview_scroll(delta*3,'units')
+        doc_canvas.bind('<MouseWheel>',_boss_scroll); doc_canvas.bind('<Button-4>',_boss_scroll)
+        doc_canvas.bind('<Button-5>',_boss_scroll); tw.bind('<MouseWheel>',_boss_scroll)
         def _on_configure(e):
             doc_canvas.configure(scrollregion=doc_canvas.bbox('all'))
-            # 水平居中 A4 纸
-            cw = doc_canvas.winfo_width()
-            aw = a4_outer.winfo_reqwidth()
-            x  = max(0, (cw - aw) // 2)
-            doc_canvas.coords(doc_canvas.find_all()[0], x, 0)
-        a4_outer.bind('<Configure>', _on_configure)
- 
-        # ── 6. 状态栏 ────────────────────────────────────────────────────────
-        status = tk.Frame(self.boss_frame, bg=WORD_BLUE, height=22)
-        status.pack(fill='x', side='bottom'); status.pack_propagate(False)
- 
-        tk.Label(status, text='第 1 页，共 5 页  |  2,847 个字  |  中文(中国)',
-                 font=('', 8), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=10)
-        # 右侧视图按钮 + 缩放
-        right_f = tk.Frame(status, bg=WORD_BLUE); right_f.pack(side='right', padx=8)
-        for sym, active in [('📄', True), ('🌐', False), ('📖', False)]:
-            c = 'white' if active else '#c7d8f0'
-            tk.Label(right_f, text=sym, font=('', 9), bg=WORD_BLUE, fg=c,
-                     cursor='hand2').pack(side='left', padx=2)
-        tk.Label(right_f, text='  ─────  100%',
-                 font=('', 8), bg=WORD_BLUE, fg='#c7d8f0').pack(side='left', padx=4)
- 
-    def _draw_ruler(self, canvas):
-        """绘制 Word 风格标尺"""
+            cw=doc_canvas.winfo_width(); aw=a4_outer.winfo_reqwidth()
+            x=max(0,(cw-aw)//2); doc_canvas.coords(doc_canvas.find_all()[0],x,0)
+        a4_outer.bind('<Configure>',_on_configure)
+        status=tk.Frame(self.boss_frame,bg='#2b579a',height=22)
+        status.pack(fill='x',side='bottom'); status.pack_propagate(False)
+        tk.Label(status,text='第 1 页，共 5 页  |  2,847 个字  |  中文(中国)',
+                 font=('',8),bg='#2b579a',fg='#c7d8f0').pack(side='left',padx=10)
+
+    def _draw_ruler(self,canvas):
+        if canvas is None: return
         try:
-            canvas.update_idletasks()
-            W = canvas.winfo_width()
-            H = 16
-            canvas.delete('all')
-            canvas.create_rectangle(0, 0, W, H, fill='#f0eeeb', outline='')
-            # 灰色文档区（页边距外）
-            margin_px = max(0, (W - 520) // 2)
-            canvas.create_rectangle(0, 0, margin_px, H, fill='#d0cec9', outline='')
-            canvas.create_rectangle(W - margin_px, 0, W, H, fill='#d0cec9', outline='')
-            # 刻度线
-            for i in range(0, 26):
-                x = margin_px + i * 20
-                if x > W - margin_px: break
-                h_tick = 8 if i % 5 == 0 else 4
-                canvas.create_line(x, H - h_tick, x, H, fill='#888', width=1)
-                if i % 5 == 0 and i > 0:
-                    canvas.create_text(x, 3, text=str(i), font=('', 7), fill='#666', anchor='n')
-        except:
-            pass
- 
-    def toggle_boss_mode(self, event=None):
-        """Ctrl+D：在阅读模式 ↔ Word 伪装模式之间切换"""
-        if not hasattr(self, 'boss_frame'):
-            self._build_boss_mode_ui()
- 
-        self._is_boss_mode = not self._is_boss_mode
- 
+            canvas.update_idletasks(); W=canvas.winfo_width(); H=16
+            canvas.delete('all'); canvas.create_rectangle(0,0,W,H,fill='#f0eeeb',outline='')
+            margin_px=max(0,(W-520)//2)
+            canvas.create_rectangle(0,0,margin_px,H,fill='#d0cec9',outline='')
+            canvas.create_rectangle(W-margin_px,0,W,H,fill='#d0cec9',outline='')
+            for i in range(0,26):
+                x=margin_px+i*20
+                if x>W-margin_px: break
+                h_tick=8 if i%5==0 else 4
+                canvas.create_line(x,H-h_tick,x,H,fill='#888',width=1)
+                if i%5==0 and i>0:
+                    canvas.create_text(x,3,text=str(i),font=('',7),fill='#666',anchor='n')
+        except: pass
+
+    def toggle_boss_mode(self,event=None):
+        if not hasattr(self,'boss_frame'): self._build_boss_mode_ui()
+        self._is_boss_mode=not self._is_boss_mode
         if self._is_boss_mode:
-            # ── 切入老板模式 ─────────────────────────────────────────────────
-            self._real_title    = self.root.title()
-            self._real_geometry = self.root.geometry()
-            self._real_alpha    = self.root.attributes('-alpha')
- 
-            # 隐藏阅读界面
-            for w in (self.topbar, self.setbar, self.sep,
-                      self.txt_frame, self.bot_area):
+            self._real_title=self.root.title()
+            self._real_geometry=self.root.geometry()
+            self._real_alpha=self.root.attributes('-alpha')
+            for w in (self.topbar,self.setbar,self.sep,self.txt_frame,self.bot_area,self.prog_canvas):
                 w.pack_forget()
- 
-            # 停止 TTS（声音会暴露）
             if self._tts_playing:
-                self.tts.stop()
-                self._tts_playing = False
-                self.btn_tts.config(text='🔊')
- 
-            # 恢复完全不透明
-            self.root.attributes('-alpha', 1.0)
- 
-            # 刷新文档内容
+                self.tts.stop(); self._tts_playing=False; self.btn_tts.config(text='🔊')
+            self.root.attributes('-alpha',1.0)
             self._refresh_boss_doc()
- 
-            # 根据屏幕大小调整窗口（模拟 Word 默认大小）
-            sw = self.root.winfo_screenwidth()
-            sh = self.root.winfo_screenheight()
-            w  = min(1100, sw - 60)
-            h  = min(860,  sh - 60)
-            x  = (sw - w) // 2
-            y  = max(0, (sh - h) // 2 - 20)
+            sw=self.root.winfo_screenwidth(); sh=self.root.winfo_screenheight()
+            w=min(1100,sw-60); h=min(860,sh-60); x=(sw-w)//2; y=max(0,(sh-h)//2-20)
             self.root.geometry(f'{w}x{h}+{x}+{y}')
             self.root.title('项目可行性研究报告.docx - Word')
             self.root.configure(bg='#b0b0b0')
- 
-            # 显示 Word 界面
-            self.boss_frame.pack(fill='both', expand=True)
- 
-            # 重绘标尺（窗口宽度变了）
-            self.root.after(100, lambda: self._draw_ruler(
-                [w for w in self.boss_frame.winfo_children()
-                 if isinstance(w, tk.Canvas)][0]
-                if any(isinstance(w, tk.Canvas)
-                       for w in self.boss_frame.winfo_children()) else None
-            ))
- 
+            self.boss_frame.pack(fill='both',expand=True)
+            canvas_list=[w for w in self.boss_frame.winfo_children() if isinstance(w,tk.Canvas)]
+            if canvas_list: self.root.after(100,lambda:self._draw_ruler(canvas_list[0]))
         else:
-            # ── 退出老板模式 ─────────────────────────────────────────────────
             self.boss_frame.pack_forget()
- 
-            # 恢复窗口属性
             self.root.geometry(self._real_geometry)
             self.root.title(self._real_title)
-            self.root.attributes('-alpha', self._real_alpha)
- 
-            # 恢复阅读界面
-            self._apply_theme()   # 先刷新颜色
- 
+            self.root.attributes('-alpha',self._real_alpha)
+            self._apply_theme()
             self.topbar.pack(fill='x')
-            if self._settings_open:
-                self.setbar.pack(fill='x', after=self.topbar)
+            self.prog_canvas.pack(fill='x',after=self.topbar)
+            if self._settings_open: self.setbar.pack(fill='x',after=self.topbar)
             self.sep.pack(fill='x')
-            self.txt_frame.pack(fill='both', expand=True)
-            self.bot_area.pack(fill='x', side='bottom')
- 
-            # 恢复焦点
+            self.txt_frame.pack(fill='both',expand=True)
+            self.bot_area.pack(fill='x',side='bottom')
             self.root.focus_set()
 
     # ─────────────────────────────────────────────────
     # 关闭与快捷键
     # ─────────────────────────────────────────────────
     def _on_close(self):
-        self.tts.stop()
-        self._shelf_update()
-        self.root.destroy()
+        self.tts.stop(); self._shelf_update(); self.root.destroy()
 
     def _bind_keys(self):
         r=self.root
@@ -14599,7 +16954,7 @@ class App:
         r.bind('<Control-M>',    lambda e: self.open_summary())
         r.bind('<Control-g>',    lambda e: self.open_chapter_finder())
         r.bind('<Control-G>',    lambda e: self.open_chapter_finder())
-        r.bind('<Control-d>',    self.toggle_boss_mode) # ★ 唤醒 Word 老板键 ★
+        r.bind('<Control-d>',    self.toggle_boss_mode)
         r.bind('<Control-D>',    self.toggle_boss_mode)
         r.bind('<KeyPress-d>',   self._dp)
         r.bind('<KeyPress-D>',   self._dp)

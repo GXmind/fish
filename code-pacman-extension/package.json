@@ -2,7 +2,7 @@
   "name": "code-pacman",
   "displayName": "Code Pacman",
   "description": "Turn the active VS Code editor into a hide-at-work Pac-Man playground.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "local",
   "license": "MIT",
   "engines": {

@@ -1,0 +1,96 @@
+{
+  "name": "code-pacman",
+  "displayName": "Code Pacman",
+  "description": "Turn the active VS Code editor into a hide-at-work Pac-Man playground.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "keywords": [
+    "pacman",
+    "game",
+    "fun",
+    "editor",
+    "productivity"
+  ],
+  "categories": [
+    "Fun"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onCommand:codePacman.toggle",
+    "onCommand:codePacman.exit",
+    "onCommand:codePacman.moveUp",
+    "onCommand:codePacman.moveDown",
+    "onCommand:codePacman.moveLeft",
+    "onCommand:codePacman.moveRight"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codePacman.toggle",
+        "title": "Code Pacman: Toggle"
+      },
+      {
+        "command": "codePacman.exit",
+        "title": "Code Pacman: Exit"
+      },
+      {
+        "command": "codePacman.moveUp",
+        "title": "Code Pacman: Move Up"
+      },
+      {
+        "command": "codePacman.moveDown",
+        "title": "Code Pacman: Move Down"
+      },
+      {
+        "command": "codePacman.moveLeft",
+        "title": "Code Pacman: Move Left"
+      },
+      {
+        "command": "codePacman.moveRight",
+        "title": "Code Pacman: Move Right"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codePacman.toggle",
+        "key": "ctrl+d",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "codePacman.exit",
+        "key": "escape",
+        "when": "codePacman.running && editorTextFocus"
+      },
+      {
+        "command": "codePacman.moveUp",
+        "key": "alt+up",
+        "when": "codePacman.running && editorTextFocus"
+      },
+      {
+        "command": "codePacman.moveDown",
+        "key": "alt+down",
+        "when": "codePacman.running && editorTextFocus"
+      },
+      {
+        "command": "codePacman.moveLeft",
+        "key": "alt+left",
+        "when": "codePacman.running && editorTextFocus"
+      },
+      {
+        "command": "codePacman.moveRight",
+        "key": "alt+right",
+        "when": "codePacman.running && editorTextFocus"
+      }
+    ]
+  }
+}

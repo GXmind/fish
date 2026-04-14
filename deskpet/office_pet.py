@@ -553,17 +553,21 @@ class OfficePet:
         else:
             self.cv.create_oval(p["x"] - size * 0.22, p["y"] - size * 0.14, p["x"] + size * 0.22, p["y"] + size * 0.14, fill="#d9a46b", outline="")
 
-    def draw_face(self, bx, by):
-        c, expr = self.cfg, self.face_name()
-        face_shift_x = 0
-        face_shift_y = 0
+    def face_shift(self):
+        sx = 0
+        sy = 0
         if self.drag:
             if self.grab_part == "cheek_left":
-                face_shift_x = -4 - self.drag_tension * 4
+                sx = -4 - self.drag_tension * 4
             elif self.grab_part == "cheek_right":
-                face_shift_x = 4 + self.drag_tension * 4
+                sx = 4 + self.drag_tension * 4
             elif self.grab_part == "crown":
-                face_shift_y = -4 - self.drag_tension * 3
+                sy = -4 - self.drag_tension * 3
+        return sx, sy
+
+    def draw_face(self, bx, by):
+        c, expr = self.cfg, self.face_name()
+        face_shift_x, face_shift_y = self.face_shift()
         eye_y = -17 if self.pet != "乌鲁鲁" else -14
         le, re = self.pt(bx, by, -14 + face_shift_x * 0.35, eye_y + face_shift_y), self.pt(bx, by, 14 + face_shift_x * 0.35, eye_y + face_shift_y)
 
@@ -631,13 +635,74 @@ class OfficePet:
         if self.pet == "乌鲁鲁":
             self.cv.create_arc(bx - 18, by - 5, bx + 18, by + 21, start=210, extent=120, style=tk.ARC, outline=tint(c["outline"], 1.06), width=2)
 
+    def draw_pikachu_face(self, bx, by):
+        c, expr = self.cfg, self.face_name()
+        sx, sy = self.face_shift()
+        left_eye = self.pt(bx, by, -14 + sx * 0.28, -18 + sy)
+        right_eye = self.pt(bx, by, 14 + sx * 0.28, -18 + sy)
+
+        def open_eye(pos, excited=False):
+            rx = 6 if not excited else 7
+            ry = 8 if not excited else 9
+            self.cv.create_oval(pos[0] - rx, pos[1] - ry, pos[0] + rx, pos[1] + ry, fill="#33231b", outline="")
+            self.cv.create_oval(pos[0] - rx + 1.6, pos[1] - ry + 1.2, pos[0] + rx - 1.6, pos[1] + ry - 1.8, fill="#5e4a43", outline="")
+            self.cv.create_oval(pos[0] - rx + 2.2, pos[1] - ry + 2.0, pos[0] + rx - 2.0, pos[1] + ry - 2.6, fill="#6a8fc7", outline="")
+            self.cv.create_oval(pos[0] - 3.3, pos[1] - 5.5, pos[0] + 0.4, pos[1] - 1.4, fill="white", outline="")
+            self.cv.create_oval(pos[0] + 1.2, pos[1] - 1.2, pos[0] + 3.4, pos[1] + 1.4, fill="white", outline="")
+
+        if expr in {"blink", "sleep"}:
+            for eye in (left_eye, right_eye):
+                self.cv.create_arc(eye[0] - 8, eye[1] - 1, eye[0] + 8, eye[1] + 7, start=200, extent=140, style=tk.ARC, outline="#32231c", width=3)
+        elif expr == "happy":
+            for eye in (left_eye, right_eye):
+                self.cv.create_arc(eye[0] - 9, eye[1] - 1, eye[0] + 9, eye[1] + 10, start=200, extent=140, style=tk.ARC, outline="#32231c", width=3)
+        elif expr == "squish":
+            self.cv.create_arc(left_eye[0] - 7, left_eye[1], left_eye[0] + 7, left_eye[1] + 6, start=180, extent=180, style=tk.ARC, outline="#32231c", width=3)
+            self.cv.create_arc(right_eye[0] - 7, right_eye[1], right_eye[0] + 7, right_eye[1] + 6, start=180, extent=180, style=tk.ARC, outline="#32231c", width=3)
+        elif expr == "dizzy":
+            self.cv.create_text(left_eye[0], left_eye[1], text="×", fill="#32231c", font=("Microsoft YaHei UI", 10, "bold"))
+            self.cv.create_text(right_eye[0], right_eye[1], text="×", fill="#32231c", font=("Microsoft YaHei UI", 10, "bold"))
+        else:
+            open_eye(left_eye, expr in {"sparkle", "surprised"})
+            if expr == "peek":
+                self.cv.create_arc(right_eye[0] - 7, right_eye[1] - 2, right_eye[0] + 7, right_eye[1] + 8, start=200, extent=150, style=tk.ARC, outline="#32231c", width=3)
+            else:
+                open_eye(right_eye, expr in {"sparkle", "surprised"})
+
+        for px in (-21, 21):
+            cx, cy = self.pt(bx, by, px + sx * 0.36, 0 + sy * 0.2)
+            self.cv.create_oval(cx - 9, cy - 8, cx + 9, cy + 8, fill="#f76561", outline="")
+            self.cv.create_oval(cx - 7, cy - 6, cx + 7, cy + 6, fill="#ef605b", outline="")
+
+        nx, ny = self.pt(bx, by, sx * 0.2, -8 + sy * 0.7)
+        self.cv.create_oval(nx - 2.3, ny - 1.6, nx + 2.3, ny + 1.6, fill="#5a4634", outline="")
+        mx, my = self.pt(bx, by, sx * 0.45, 6 + sy * 0.8)
+        if expr in {"surprised", "dizzy"}:
+            self.cv.create_oval(mx - 5, my - 3, mx + 5, my + 7, outline="#7a4d28", width=3)
+        elif expr in {"happy", "sparkle", "peek"}:
+            self.cv.create_oval(mx - 9, my - 1, mx + 9, my + 13, fill="#8f4c22", outline="#7a4d28", width=2)
+            self.cv.create_arc(mx - 9, my - 7, mx + 9, my + 7, start=180, extent=180, style=tk.CHORD, fill=c["main"], outline=c["main"])
+            self.cv.create_arc(mx - 5, my + 2, mx + 5, my + 12, start=180, extent=180, style=tk.CHORD, fill="#ff8b66", outline="#ff8b66")
+        elif expr == "chew":
+            self.cv.create_oval(mx - 8, my - 1, mx + 8, my + 11, fill="#8f4c22", outline="#7a4d28", width=2)
+            self.cv.create_arc(mx - 8, my - 7, mx + 8, my + 6, start=180, extent=180, style=tk.CHORD, fill=c["main"], outline=c["main"])
+        elif expr == "sad":
+            self.cv.create_arc(mx - 10, my + 3, mx + 10, my + 10, start=20, extent=140, style=tk.ARC, outline="#7a4d28", width=3)
+        else:
+            self.cv.create_line(mx - 7, my + 4, mx + 7, my + 4, fill="#7a4d28", width=3, capstyle=tk.ROUND)
+
+        if expr == "sparkle":
+            self.cv.create_text(right_eye[0] + 12, right_eye[1] - 11, text="✦", fill="#ffbd43", font=("Segoe UI Symbol", 10, "bold"))
+        if expr == "sleep":
+            self.cv.create_text(bx + 46, by - 54, text="Z", fill="#8fa6ff", font=("Segoe UI", 12, "bold"))
+
     def draw_tail(self, bx, by):
         c = self.cfg
         swing = math.sin(self.phase * (5.2 if self.behavior in {"happy", "slack"} else 3.6)) * 8
         if time.monotonic() < self.act_until and self.act == "wiggle":
             swing *= 1.8
         if c["tail_style"] == "lightning":
-            pts = [(-30, 6), (-54, -2 + swing * 0.15), (-42, -6 + swing * 0.25), (-66, -26 + swing * 0.45), (-50, -22 + swing * 0.2), (-58, -48 + swing * 0.5), (-30, -18 + swing * 0.18)]
+            pts = [(-10, 18), (10, 8 + swing * 0.1), (0, -2 + swing * 0.18), (22, -22 + swing * 0.32), (8, -18 + swing * 0.18), (18, -42 + swing * 0.38), (-10, -12 + swing * 0.14)]
             self.cv.create_polygon(self.poly(bx, by, pts), fill=c["tail"], outline=c["outline"], width=4, smooth=True, splinesteps=18)
         elif c["tail_style"] == "ribbon":
             self.cv.create_line(self.poly(bx, by, [(-28, 10), (-50, 2 + swing * 0.2), (-62, -16 + swing)]), fill=c["tail"], width=12, smooth=True, capstyle=tk.ROUND)
@@ -654,8 +719,8 @@ class OfficePet:
             outer = [[(-22, -34), (-42, -66), (-8, -49)], [(22, -34), (42, -66), (8, -49)]]
             inner = [[(-20, -39), (-31, -58), (-10, -48)], [(20, -39), (31, -58), (10, -48)]]
         else:
-            outer = [[(-21, -35), (-24, -96), (-10, -50)], [(21, -35), (24, -96), (10, -50)]]
-            inner = [[(-17, -38), (-18, -73), (-10, -49)], [(17, -38), (18, -73), (10, -49)]]
+            outer = [[(-24, -42), (-17, -106), (-6, -55)], [(24, -42), (17, -106), (6, -55)]]
+            inner = [[(-18, -46), (-15, -78), (-8, -54)], [(18, -46), (15, -78), (8, -54)]]
         for pts in outer:
             self.cv.create_polygon(self.poly(bx, by, pts), fill=c["main"], outline=c["outline"], width=4, smooth=True, splinesteps=18)
         for pts in inner:
@@ -667,6 +732,46 @@ class OfficePet:
     def draw_pet(self):
         c = self.cfg
         bx, by = self.anchor()
+        if self.pet == "皮卡丘":
+            self.cv.create_oval(bx - 58 * (1 + abs(self.sx - 1) * 0.34), 170, bx + 58 * (1 + abs(self.sx - 1) * 0.34), 182, fill=c["shadow"], outline="")
+            self.draw_tail(bx + 18, by + 2)
+            self.blob(bx, by, 0, 20, 33, 31, c["main"], c["outline"], bulges=self.body_bulges())
+            self.draw_ears(bx, by)
+            self.blob(bx, by, 0, -13, 44, 40, c["main"], c["outline"], bulges=self.head_bulges())
+            self.blob(bx, by, 0, -2, 19, 14, c["light"], c["outline"], 3)
+            self.cv.create_oval(*self.oval(bx, by, -7, -24, 10, 8), fill="#ffe880", outline="")
+            self.cv.create_oval(*self.oval(bx, by, 7, -22, 8, 7), fill="#ffe880", outline="")
+            if self.drag and self.grab_part in {"head", "cheek_left", "cheek_right", "crown"}:
+                gx, gy = self.grab
+                self.blob(
+                    bx,
+                    by,
+                    gx + self.drag_vec[0] * 0.08,
+                    gy + self.drag_vec[1] * 0.06 - 4,
+                    14 + 9 * (0.35 + self.drag_tension * 0.7),
+                    10 + 7 * (0.35 + self.drag_tension * 0.7),
+                    c["main"],
+                    c["outline"],
+                    3,
+                )
+            self.cv.create_oval(*self.oval(bx, by, 0, 25, 17, 17), fill="#ffe880", outline="")
+            self.cv.create_oval(*self.oval(bx, by, -8, 16, 10, 9), fill="#ffe37b", outline="")
+            for dy in (-2, 10):
+                self.cv.create_polygon(self.poly(bx, by, [(-7, dy + 8), (0, dy), (5, dy + 6), (-1, dy + 16)]), fill="#8f6b36", outline="", smooth=True)
+            arm_shift = 0
+            if time.monotonic() < self.act_until and self.act == "wave":
+                arm_shift = 12 + math.sin(self.phase * 7.2) * 4
+            self.cv.create_oval(*self.oval(bx, by, -22, 14, 7, 16), fill=c["main"], outline=c["outline"], width=3)
+            self.cv.create_oval(*self.oval(bx, by, 21, 10 - arm_shift * 0.55, 7, 18), fill=c["main"], outline=c["outline"], width=3)
+            self.cv.create_oval(*self.oval(bx, by, -16, 48, 9, 15), fill=c["main"], outline=c["outline"], width=3)
+            self.cv.create_oval(*self.oval(bx, by, 16, 48, 9, 15), fill=c["main"], outline=c["outline"], width=3)
+            for x in (-18, 18):
+                self.cv.create_oval(*self.oval(bx, by, x, 55, 10, 6), fill="#f3c46c", outline="")
+            if time.monotonic() < self.act_until and self.act == "chew":
+                cx, cy = self.pt(bx, by, 18, 8)
+                self.cv.create_oval(cx - 3, cy - 2, cx + 3, cy + 2, fill="#d8a26f", outline="")
+            self.draw_pikachu_face(bx, by)
+            return
         self.cv.create_oval(bx - 56 * (1 + abs(self.sx - 1) * 0.38), 168, bx + 56 * (1 + abs(self.sx - 1) * 0.38), 180, fill=c["shadow"], outline="")
         self.draw_tail(bx, by)
         body_y = 20 if self.pet == "乌鲁鲁" else 18

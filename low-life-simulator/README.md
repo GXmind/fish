@@ -65,3 +65,7 @@ media/main.js       Webview 前端交互
 media/style.css     侧边栏样式
 media/icon.svg      Activity Bar 图标
 ```
+## 说明
+```txt
+后续仓库不在更新新的包体，新版本会及时更新到vscode上面，可以直接更新
+```

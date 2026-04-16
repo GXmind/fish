@@ -6,6 +6,7 @@ const achievementTitles = boot.achievementTitles || {};
 let current = null;
 let actions = [];
 let stats = [];
+let hasApiKey = false;
 let activeTab = "status";
 
 const elements = {
@@ -14,11 +15,16 @@ const elements = {
   startBtn: document.getElementById("startBtn"),
   bossBtn: document.getElementById("bossBtn"),
   resetBtn: document.getElementById("resetBtn"),
+  offlineModeBtn: document.getElementById("offlineModeBtn"),
+  aiModeBtn: document.getElementById("aiModeBtn"),
+  setApiKeyBtn: document.getElementById("setApiKeyBtn"),
   stats: document.getElementById("stats"),
+  pendingPanel: document.getElementById("pendingPanel"),
   eventTitle: document.getElementById("eventTitle"),
   eventText: document.getElementById("eventText"),
   summaryPanel: document.getElementById("summaryPanel"),
   actionsPanel: document.getElementById("actionsPanel"),
+  aiPanel: document.getElementById("aiPanel"),
   logs: document.getElementById("logs"),
   achievements: document.getElementById("achievements"),
   fakeTerminal: document.getElementById("fakeTerminal")
@@ -33,6 +39,7 @@ window.addEventListener("message", (event) => {
   current = message.state;
   actions = message.actions || [];
   stats = message.stats || [];
+  hasApiKey = Boolean(message.hasApiKey);
   render();
 });
 
@@ -58,6 +65,18 @@ elements.bossBtn.addEventListener("click", () => {
   renderFakeTerminal();
 });
 
+elements.offlineModeBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "mode", mode: "offline" });
+});
+
+elements.aiModeBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "mode", mode: "ai" });
+});
+
+elements.setApiKeyBtn.addEventListener("click", () => {
+  vscode.postMessage({ type: "setApiKey" });
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && document.body.classList.contains("disguise")) {
     document.body.classList.remove("disguise");
@@ -72,8 +91,14 @@ function render() {
   elements.clock.textContent = current.phase === "ready" ? "--:--" : formatTime(current.time);
   elements.subtitle.textContent = subtitleText(current);
   elements.startBtn.textContent = current.phase === "playing" ? "重新开始" : "开始新的一天";
+  elements.offlineModeBtn.classList.toggle("active", current.mode !== "ai");
+  elements.aiModeBtn.classList.toggle("active", current.mode === "ai");
+  elements.setApiKeyBtn.textContent = hasApiKey ? "API Key 已设" : "API Key";
+
   renderStats();
+  renderPendingEvent();
   renderEvent();
+  renderAiPanel();
   renderSummary();
   renderActions();
   renderLogs();
@@ -87,13 +112,44 @@ function renderStats() {
   for (const stat of stats) {
     const value = current.stats[stat.key] || 0;
     const percent = Math.round((value / stat.max) * 100);
+    const danger =
+      (stat.dangerLow && percent <= 15) ||
+      (stat.dangerHigh && percent >= 85);
     const row = document.createElement("div");
-    row.className = `stat-row ${stat.key}`;
+    row.className = `stat-row ${stat.key}${danger ? " danger" : ""}`;
     row.innerHTML =
       `<span>${escapeHtml(stat.label)}</span>` +
       `<div class="bar"><span style="width:${percent}%"></span></div>` +
       `<span>${value}</span>`;
     elements.stats.appendChild(row);
+  }
+}
+
+function renderPendingEvent() {
+  const event = current.pendingEvent;
+  if (!event) {
+    elements.pendingPanel.hidden = true;
+    elements.pendingPanel.innerHTML = "";
+    return;
+  }
+
+  elements.pendingPanel.hidden = false;
+  elements.pendingPanel.innerHTML =
+    `<div class="event-title">紧急事件</div>` +
+    `<p class="event-text"><strong>${escapeHtml(event.title)}</strong><br>${escapeHtml(event.text)}</p>` +
+    `<div class="option-grid"></div>`;
+
+  const grid = elements.pendingPanel.querySelector(".option-grid");
+  for (const option of event.options || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "danger-button";
+    button.textContent = option.label;
+    button.title = optionTooltip(option);
+    button.addEventListener("click", () => {
+      vscode.postMessage({ type: "resolveEvent", optionId: option.id });
+    });
+    grid.appendChild(button);
   }
 }
 
@@ -103,6 +159,26 @@ function renderEvent() {
   elements.eventText.textContent = last.text;
 }
 
+function renderAiPanel() {
+  if (current.mode !== "ai") {
+    elements.aiPanel.hidden = true;
+    elements.aiPanel.innerHTML = "";
+    return;
+  }
+
+  const ai = current.ai || {};
+  elements.aiPanel.hidden = false;
+  const status = ai.status === "loading" ? "生成中" : ai.status === "error" ? "异常" : "AI 模式";
+  elements.aiPanel.innerHTML =
+    `<div class="event-title">${status}</div>` +
+    `<p class="event-text">${escapeHtml(ai.message || "可以让 MiniMax 根据当前状态生成随机任务。")}</p>` +
+    `<div class="toolbar compact"><button id="generateAiBtn" ${ai.status === "loading" ? "disabled" : ""}>生成 AI 任务</button></div>`;
+
+  elements.aiPanel.querySelector("#generateAiBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "generateAiTasks" });
+  });
+}
+
 function renderSummary() {
   if (!current.summary) {
     elements.summaryPanel.hidden = true;
@@ -110,23 +186,25 @@ function renderSummary() {
     return;
   }
 
+  const riskTax = current.summary.riskTax ? `<br>风险扣减 -${current.summary.riskTax}` : "";
   elements.summaryPanel.hidden = false;
   elements.summaryPanel.innerHTML =
     `<div class="event-title">今日结算</div>` +
     `<p class="event-text"><strong>${escapeHtml(current.summary.title)}</strong><br>` +
-    `${escapeHtml(current.summary.text)}<br>金币 +${current.summary.reward}</p>`;
+    `${escapeHtml(current.summary.text)}<br>金币 +${current.summary.reward}${riskTax}</p>`;
 }
 
 function renderActions() {
   elements.actionsPanel.innerHTML = "";
-  const disabled = current.phase === "ended";
-  const grouped = actions.reduce((bucket, action) => {
+  const disabled = current.phase === "ended" || Boolean(current.pendingEvent);
+  const allActions = actions.concat(current.mode === "ai" ? (current.ai.tasks || []) : []);
+  const grouped = allActions.reduce((bucket, action) => {
     bucket[action.group] = bucket[action.group] || [];
     bucket[action.group].push(action);
     return bucket;
   }, {});
 
-  for (const group of ["work", "slack", "rest", "risky"]) {
+  for (const group of ["ai", "work", "slack", "rest", "risky"]) {
     const groupActions = grouped[group] || [];
     if (!groupActions.length) {
       continue;
@@ -141,8 +219,8 @@ function renderActions() {
       const button = document.createElement("button");
       button.type = "button";
       button.disabled = disabled;
-      button.title = `${action.minutes} 分钟`;
-      button.textContent = action.label;
+      button.title = actionTooltip(action);
+      button.innerHTML = `<span>${escapeHtml(action.label)}</span><small>${escapeHtml(actionMeta(action))}</small>`;
       button.addEventListener("click", () => {
         vscode.postMessage({ type: "action", actionId: action.id });
       });
@@ -152,12 +230,18 @@ function renderActions() {
     elements.actionsPanel.appendChild(section);
   }
 
-  if (disabled) {
-    const hint = document.createElement("p");
-    hint.className = "muted";
-    hint.textContent = "今天已经下班。开始新的一天可以继续挑战。";
-    elements.actionsPanel.appendChild(hint);
+  if (current.pendingEvent) {
+    appendHint("先处理上方紧急事件，普通行动暂停。");
+  } else if (current.phase === "ended") {
+    appendHint("今天已经下班。开始新的一天可以继续挑战。");
   }
+}
+
+function appendHint(text) {
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent = text;
+  elements.actionsPanel.appendChild(hint);
 }
 
 function renderLogs() {
@@ -210,25 +294,73 @@ function renderFakeTerminal() {
 
   const risk = current.stats ? current.stats.risk : 0;
   const performance = current.stats ? current.stats.performance : 0;
+  const money = current.stats ? current.stats.money : 0;
   elements.fakeTerminal.textContent =
     "> npm run analyze-workday\n" +
     "[info] scanning active workspace...\n" +
     "[info] resolving productivity graph...\n" +
+    `[info] mode=${current.mode || "offline"}\n` +
     "[info] current branch: feature/workday-simulation\n" +
     `[metric] performance_index=${performance}\n` +
     `[metric] context_risk=${risk}\n` +
+    `[metric] budget_coins=${money}\n` +
     `[ok] report generated at ${new Date().toLocaleTimeString()}\n\n` +
     "Press Esc to return.";
 }
 
 function subtitleText(state) {
+  const mode = state.mode === "ai" ? "AI 模式" : "离线模式";
   if (state.phase === "ready") {
-    return "藏在侧边栏里的文字打工游戏";
+    return `${mode} · 藏在侧边栏里的文字打工游戏`;
   }
   if (state.phase === "ended") {
-    return `Day ${state.day} 已下班`;
+    return `${mode} · Day ${state.day} 已下班`;
   }
-  return `Day ${state.day} 工位存活中`;
+  return `${mode} · Day ${state.day} 工位存活中`;
+}
+
+function actionMeta(action) {
+  const parts = [`${action.minutes} 分钟`];
+  if (action.cost) {
+    parts.push(`-${action.cost} 金币`);
+  }
+  if (action.requires) {
+    const requirements = Object.entries(action.requires).map(([key, value]) => `${statName(key)}>${value}`);
+    parts.push(requirements.join(" "));
+  }
+  return parts.join(" · ");
+}
+
+function actionTooltip(action) {
+  const effects = effectsText(action.effects);
+  return effects ? `${actionMeta(action)}\n${effects}` : actionMeta(action);
+}
+
+function optionTooltip(option) {
+  const parts = [];
+  if (option.minutes) {
+    parts.push(`${option.minutes} 分钟`);
+  }
+  if (option.cost) {
+    parts.push(`-${option.cost} 金币`);
+  }
+  const effects = effectsText(option.effects);
+  if (effects) {
+    parts.push(effects);
+  }
+  return parts.join("\n");
+}
+
+function effectsText(effects) {
+  return Object.entries(effects || {})
+    .filter(([, value]) => Number(value) !== 0)
+    .map(([key, value]) => `${statName(key)} ${Number(value) > 0 ? "+" : ""}${value}`)
+    .join("，");
+}
+
+function statName(key) {
+  const stat = stats.find((item) => item.key === key);
+  return stat ? stat.label : key;
 }
 
 function formatTime(minutes) {

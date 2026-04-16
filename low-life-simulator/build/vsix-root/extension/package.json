@@ -2,7 +2,7 @@
   "name": "low-life-simulator",
   "displayName": "低配人生：工位模拟器",
   "description": "A tiny workday text simulator hidden in the VS Code sidebar.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -26,7 +26,10 @@
     "onView:lowLifeSimulator.sidebar",
     "onCommand:lowLifeSimulator.open",
     "onCommand:lowLifeSimulator.startDay",
-    "onCommand:lowLifeSimulator.reset"
+    "onCommand:lowLifeSimulator.reset",
+    "onCommand:lowLifeSimulator.setApiKey",
+    "onCommand:lowLifeSimulator.clearApiKey",
+    "onCommand:lowLifeSimulator.generateAiTasks"
   ],
   "main": "./extension.js",
   "scripts": {
@@ -45,8 +48,35 @@
       {
         "command": "lowLifeSimulator.reset",
         "title": "低配人生: 重置存档"
+      },
+      {
+        "command": "lowLifeSimulator.setApiKey",
+        "title": "低配人生: 设置 MiniMax API Key"
+      },
+      {
+        "command": "lowLifeSimulator.clearApiKey",
+        "title": "低配人生: 清除 MiniMax API Key"
+      },
+      {
+        "command": "lowLifeSimulator.generateAiTasks",
+        "title": "低配人生: 生成 AI 任务"
       }
     ],
+    "configuration": {
+      "title": "低配人生",
+      "properties": {
+        "lowLifeSimulator.minimaxBaseUrl": {
+          "type": "string",
+          "default": "https://api.minimax.io/v1",
+          "description": "MiniMax OpenAI-compatible base URL. 中国用户可按 MiniMax 控制台说明改为 https://api.minimaxi.com/v1。"
+        },
+        "lowLifeSimulator.minimaxModel": {
+          "type": "string",
+          "default": "MiniMax-M2.7-highspeed",
+          "description": "用于 AI 模式生成随机任务的 MiniMax 模型。"
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {

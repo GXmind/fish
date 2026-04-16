@@ -90,10 +90,15 @@ button:disabled {
 }
 
 .toolbar,
-.tabs {
+.tabs,
+.mode-panel {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.toolbar.compact {
+  margin-top: 8px;
 }
 
 .tabs button {
@@ -101,6 +106,16 @@ button:disabled {
 }
 
 .tabs button.active {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.mode-panel button {
+  flex: 1 1 72px;
+}
+
+.mode-panel button.active {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
   outline: 1px solid var(--vscode-focusBorder);
 }
 
@@ -153,6 +168,14 @@ button:disabled {
   background: var(--vscode-charts-yellow);
 }
 
+.stat-row.danger {
+  color: var(--vscode-errorForeground);
+}
+
+.stat-row.danger .bar {
+  border-color: var(--vscode-errorForeground);
+}
+
 .event-title,
 .group-title {
   margin: 0 0 6px;
@@ -164,6 +187,22 @@ button:disabled {
 .event-text {
   margin: 0;
   word-break: break-word;
+}
+
+.warning-panel {
+  border-color: var(--vscode-editorWarning-foreground);
+  background: var(--vscode-inputValidation-warningBackground);
+}
+
+.option-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.danger-button {
+  background: var(--vscode-button-background);
 }
 
 .group {
@@ -185,6 +224,18 @@ button:disabled {
   width: 100%;
   min-width: 0;
   white-space: normal;
+  display: grid;
+  gap: 2px;
+  align-content: center;
+  min-height: 46px;
+  text-align: left;
+}
+
+.action-grid button small {
+  color: var(--vscode-button-foreground);
+  opacity: 0.78;
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .log-list {

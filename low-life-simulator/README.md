@@ -23,7 +23,7 @@ Base URL: https://api.minimax.io/v1
 Model: MiniMax-M2.7-highspeed
 ```
 
-国内用户可以在 VS Code 设置里把 `lowLifeSimulator.minimaxBaseUrl` 改为：
+国内用户可以在 VS Code 设置里把 `lifesimpress.lowLifeSimulator.minimaxBaseUrl` 改为：
 
 ```txt
 https://api.minimaxi.com/v1

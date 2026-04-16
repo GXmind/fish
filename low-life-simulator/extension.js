@@ -13,8 +13,8 @@ const {
   achievementTitleMap
 } = require("./gameEngine");
 
-const STORAGE_KEY = "lowLifeSimulator.state";
-const SECRET_KEY = "lowLifeSimulator.minimaxApiKey";
+const STORAGE_KEY = "lifesimpress.lowLifeSimulator.state";
+const SECRET_KEY = "lifesimpress.lowLifeSimulator.minimaxApiKey";
 
 class LowLifeProvider {
   constructor(context) {
@@ -23,7 +23,7 @@ class LowLifeProvider {
     this.hasApiKey = false;
     this.state = migrateState(context.globalState.get(STORAGE_KEY) || createInitialState());
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 80);
-    this.statusBar.command = "lowLifeSimulator.open";
+    this.statusBar.command = "lifesimpress.lowLifeSimulator.open";
     context.subscriptions.push(this.statusBar);
     this.refreshApiKeyState();
     this.updateStatusBar();
@@ -41,7 +41,7 @@ class LowLifeProvider {
   }
 
   async open() {
-    await vscode.commands.executeCommand("workbench.view.extension.lowLifeSimulator");
+    await vscode.commands.executeCommand("workbench.view.extension.lifesimpress-low-life-simulator");
     this.postState();
   }
 
@@ -181,7 +181,7 @@ class LowLifeProvider {
         apiKey,
         state: this.state,
         trigger,
-        configuration: vscode.workspace.getConfiguration("lowLifeSimulator")
+        configuration: vscode.workspace.getConfiguration("lifesimpress.lowLifeSimulator")
       });
       this.state = queueAiScene(this.state, scene);
     } catch (error) {
@@ -478,12 +478,12 @@ function getNonce() {
 function activate(context) {
   const provider = new LowLifeProvider(context);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("lowLifeSimulator.sidebar", provider),
-    vscode.commands.registerCommand("lowLifeSimulator.open", () => provider.open()),
-    vscode.commands.registerCommand("lowLifeSimulator.startDay", () => provider.startDay()),
-    vscode.commands.registerCommand("lowLifeSimulator.reset", () => provider.reset()),
-    vscode.commands.registerCommand("lowLifeSimulator.setApiKey", () => provider.setApiKey()),
-    vscode.commands.registerCommand("lowLifeSimulator.clearApiKey", () => provider.clearApiKey())
+    vscode.window.registerWebviewViewProvider("lifesimpress-low-life-simulator-sidebar", provider),
+    vscode.commands.registerCommand("lifesimpress.lowLifeSimulator.open", () => provider.open()),
+    vscode.commands.registerCommand("lifesimpress.lowLifeSimulator.startDay", () => provider.startDay()),
+    vscode.commands.registerCommand("lifesimpress.lowLifeSimulator.reset", () => provider.reset()),
+    vscode.commands.registerCommand("lifesimpress.lowLifeSimulator.setApiKey", () => provider.setApiKey()),
+    vscode.commands.registerCommand("lifesimpress.lowLifeSimulator.clearApiKey", () => provider.clearApiKey())
   );
 }
 

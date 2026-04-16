@@ -2,9 +2,10 @@
   "name": "low-life-simulator",
   "displayName": "低配人生：工位模拟器",
   "description": "A tiny workday text simulator hidden in the VS Code sidebar.",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "publisher": "LifesimPress",
   "license": "MIT",
+  "icon": "media/marketplace-icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -22,12 +23,12 @@
     "ui"
   ],
   "activationEvents": [
-    "onView:lowLifeSimulator.sidebar",
-    "onCommand:lowLifeSimulator.open",
-    "onCommand:lowLifeSimulator.startDay",
-    "onCommand:lowLifeSimulator.reset",
-    "onCommand:lowLifeSimulator.setApiKey",
-    "onCommand:lowLifeSimulator.clearApiKey"
+    "onView:lifesimpress-low-life-simulator-sidebar",
+    "onCommand:lifesimpress.lowLifeSimulator.open",
+    "onCommand:lifesimpress.lowLifeSimulator.startDay",
+    "onCommand:lifesimpress.lowLifeSimulator.reset",
+    "onCommand:lifesimpress.lowLifeSimulator.setApiKey",
+    "onCommand:lifesimpress.lowLifeSimulator.clearApiKey"
   ],
   "main": "./extension.js",
   "scripts": {
@@ -36,35 +37,35 @@
   "contributes": {
     "commands": [
       {
-        "command": "lowLifeSimulator.open",
+        "command": "lifesimpress.lowLifeSimulator.open",
         "title": "低配人生: 打开侧边栏"
       },
       {
-        "command": "lowLifeSimulator.startDay",
+        "command": "lifesimpress.lowLifeSimulator.startDay",
         "title": "低配人生: 开始新的一天"
       },
       {
-        "command": "lowLifeSimulator.reset",
+        "command": "lifesimpress.lowLifeSimulator.reset",
         "title": "低配人生: 重置存档"
       },
       {
-        "command": "lowLifeSimulator.setApiKey",
+        "command": "lifesimpress.lowLifeSimulator.setApiKey",
         "title": "低配人生: 设置 MiniMax API Key"
       },
       {
-        "command": "lowLifeSimulator.clearApiKey",
+        "command": "lifesimpress.lowLifeSimulator.clearApiKey",
         "title": "低配人生: 清除 MiniMax API Key"
       }
     ],
     "configuration": {
       "title": "低配人生",
       "properties": {
-        "lowLifeSimulator.minimaxBaseUrl": {
+        "lifesimpress.lowLifeSimulator.minimaxBaseUrl": {
           "type": "string",
           "default": "https://api.minimax.io/v1",
           "description": "MiniMax OpenAI-compatible base URL. 国内用户可按 MiniMax 控制台说明改为 https://api.minimaxi.com/v1。"
         },
-        "lowLifeSimulator.minimaxModel": {
+        "lifesimpress.lowLifeSimulator.minimaxModel": {
           "type": "string",
           "default": "MiniMax-M2.7-highspeed",
           "description": "用于 AI 模式自动生成随机事件的 MiniMax 模型。"
@@ -74,16 +75,16 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "lowLifeSimulator",
+          "id": "lifesimpress-low-life-simulator",
           "title": "低配人生",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "lowLifeSimulator": [
+      "lifesimpress-low-life-simulator": [
         {
-          "id": "lowLifeSimulator.sidebar",
+          "id": "lifesimpress-low-life-simulator-sidebar",
           "name": "工位模拟器",
           "type": "webview"
         }
@@ -92,13 +93,13 @@
     "menus": {
       "view/title": [
         {
-          "command": "lowLifeSimulator.startDay",
-          "when": "view == lowLifeSimulator.sidebar",
+          "command": "lifesimpress.lowLifeSimulator.startDay",
+          "when": "view == lifesimpress-low-life-simulator-sidebar",
           "group": "navigation"
         },
         {
-          "command": "lowLifeSimulator.reset",
-          "when": "view == lowLifeSimulator.sidebar",
+          "command": "lifesimpress.lowLifeSimulator.reset",
+          "when": "view == lifesimpress-low-life-simulator-sidebar",
           "group": "navigation"
         }
       ]

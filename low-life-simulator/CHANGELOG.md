@@ -20,3 +20,16 @@
 
 - Repackaged for Marketplace upload with updated publisher metadata and README wording.
 - Kept the official `vsce` packaging flow as the release source of truth.
+
+## 0.3.1
+
+- Added a Marketplace extension icon from the provided artwork.
+- Cleaned manifest strings and bumped the release for re-upload.
+
+## 0.3.2
+
+- Namespaced view, command, and setting IDs to avoid collisions with older local test builds.
+
+## 0.3.3
+
+- Fixed view container and sidebar IDs to use Marketplace-valid characters.

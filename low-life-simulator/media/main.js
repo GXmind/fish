@@ -19,12 +19,12 @@ const elements = {
   aiModeBtn: document.getElementById("aiModeBtn"),
   setApiKeyBtn: document.getElementById("setApiKeyBtn"),
   stats: document.getElementById("stats"),
+  aiStrip: document.getElementById("aiStrip"),
   pendingPanel: document.getElementById("pendingPanel"),
   eventTitle: document.getElementById("eventTitle"),
   eventText: document.getElementById("eventText"),
   summaryPanel: document.getElementById("summaryPanel"),
   actionsPanel: document.getElementById("actionsPanel"),
-  aiPanel: document.getElementById("aiPanel"),
   logs: document.getElementById("logs"),
   achievements: document.getElementById("achievements"),
   fakeTerminal: document.getElementById("fakeTerminal")
@@ -90,15 +90,15 @@ function render() {
 
   elements.clock.textContent = current.phase === "ready" ? "--:--" : formatTime(current.time);
   elements.subtitle.textContent = subtitleText(current);
-  elements.startBtn.textContent = current.phase === "playing" ? "重新开始" : "开始新的一天";
+  elements.startBtn.textContent = current.phase === "playing" ? "重开" : "开始";
   elements.offlineModeBtn.classList.toggle("active", current.mode !== "ai");
   elements.aiModeBtn.classList.toggle("active", current.mode === "ai");
-  elements.setApiKeyBtn.textContent = hasApiKey ? "API Key 已设" : "API Key";
+  elements.setApiKeyBtn.textContent = hasApiKey ? "Key 已设" : "API Key";
 
   renderStats();
+  renderAiStrip();
   renderPendingEvent();
   renderEvent();
-  renderAiPanel();
   renderSummary();
   renderActions();
   renderLogs();
@@ -112,17 +112,37 @@ function renderStats() {
   for (const stat of stats) {
     const value = current.stats[stat.key] || 0;
     const percent = Math.round((value / stat.max) * 100);
-    const danger =
-      (stat.dangerLow && percent <= 15) ||
-      (stat.dangerHigh && percent >= 85);
+    const danger = (stat.dangerLow && percent <= 15) || (stat.dangerHigh && percent >= 85);
     const row = document.createElement("div");
     row.className = `stat-row ${stat.key}${danger ? " danger" : ""}`;
     row.innerHTML =
-      `<span>${escapeHtml(stat.label)}</span>` +
+      `<span class="stat-label">${escapeHtml(stat.label)}</span>` +
       `<div class="bar"><span style="width:${percent}%"></span></div>` +
-      `<span>${value}</span>`;
+      `<span class="stat-value">${value}</span>`;
     elements.stats.appendChild(row);
   }
+}
+
+function renderAiStrip() {
+  if (current.mode !== "ai") {
+    elements.aiStrip.hidden = true;
+    elements.aiStrip.innerHTML = "";
+    return;
+  }
+
+  const statusText =
+    current.ai.status === "loading"
+      ? "AI 正在推演下一段事件"
+      : current.ai.status === "error"
+        ? current.ai.message || "AI 当前不可用"
+        : current.ai.message || "AI 会在每个回合后自动生成状态驱动事件。";
+
+  elements.aiStrip.hidden = false;
+  elements.aiStrip.innerHTML =
+    `<div class="strip-row">` +
+    `<span class="chip chip-ai">AI 模式</span>` +
+    `<span class="strip-text">${escapeHtml(statusText)}</span>` +
+    `</div>`;
 }
 
 function renderPendingEvent() {
@@ -133,18 +153,20 @@ function renderPendingEvent() {
     return;
   }
 
+  const badge = event.source === "ai" ? "AI 事件" : "紧急事件";
   elements.pendingPanel.hidden = false;
   elements.pendingPanel.innerHTML =
-    `<div class="event-title">紧急事件</div>` +
-    `<p class="event-text"><strong>${escapeHtml(event.title)}</strong><br>${escapeHtml(event.text)}</p>` +
+    `<div class="panel-head"><span class="chip ${event.source === "ai" ? "chip-ai" : "chip-danger"}">${badge}</span></div>` +
+    `<div class="pending-title">${escapeHtml(event.title)}</div>` +
+    `<p class="event-text">${escapeHtml(event.text)}</p>` +
     `<div class="option-grid"></div>`;
 
   const grid = elements.pendingPanel.querySelector(".option-grid");
   for (const option of event.options || []) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "danger-button";
-    button.textContent = option.label;
+    button.className = event.source === "ai" ? "option-button" : "option-button danger";
+    button.innerHTML = `<span>${escapeHtml(option.label)}</span><small>${escapeHtml(optionMeta(option))}</small>`;
     button.title = optionTooltip(option);
     button.addEventListener("click", () => {
       vscode.postMessage({ type: "resolveEvent", optionId: option.id });
@@ -157,26 +179,6 @@ function renderEvent() {
   const last = current.lastEvent || { title: "事件", text: "" };
   elements.eventTitle.textContent = last.title;
   elements.eventText.textContent = last.text;
-}
-
-function renderAiPanel() {
-  if (current.mode !== "ai") {
-    elements.aiPanel.hidden = true;
-    elements.aiPanel.innerHTML = "";
-    return;
-  }
-
-  const ai = current.ai || {};
-  elements.aiPanel.hidden = false;
-  const status = ai.status === "loading" ? "生成中" : ai.status === "error" ? "异常" : "AI 模式";
-  elements.aiPanel.innerHTML =
-    `<div class="event-title">${status}</div>` +
-    `<p class="event-text">${escapeHtml(ai.message || "可以让 MiniMax 根据当前状态生成随机任务。")}</p>` +
-    `<div class="toolbar compact"><button id="generateAiBtn" ${ai.status === "loading" ? "disabled" : ""}>生成 AI 任务</button></div>`;
-
-  elements.aiPanel.querySelector("#generateAiBtn").addEventListener("click", () => {
-    vscode.postMessage({ type: "generateAiTasks" });
-  });
 }
 
 function renderSummary() {
@@ -196,15 +198,17 @@ function renderSummary() {
 
 function renderActions() {
   elements.actionsPanel.innerHTML = "";
-  const disabled = current.phase === "ended" || Boolean(current.pendingEvent);
-  const allActions = actions.concat(current.mode === "ai" ? (current.ai.tasks || []) : []);
-  const grouped = allActions.reduce((bucket, action) => {
+  const disabled =
+    current.phase === "ended" ||
+    Boolean(current.pendingEvent) ||
+    current.ai.status === "loading";
+  const grouped = actions.reduce((bucket, action) => {
     bucket[action.group] = bucket[action.group] || [];
     bucket[action.group].push(action);
     return bucket;
   }, {});
 
-  for (const group of ["ai", "work", "slack", "rest", "risky"]) {
+  for (const group of ["work", "slack", "rest", "risky"]) {
     const groupActions = grouped[group] || [];
     if (!groupActions.length) {
       continue;
@@ -219,6 +223,7 @@ function renderActions() {
       const button = document.createElement("button");
       button.type = "button";
       button.disabled = disabled;
+      button.className = "action-button";
       button.title = actionTooltip(action);
       button.innerHTML = `<span>${escapeHtml(action.label)}</span><small>${escapeHtml(actionMeta(action))}</small>`;
       button.addEventListener("click", () => {
@@ -230,18 +235,13 @@ function renderActions() {
     elements.actionsPanel.appendChild(section);
   }
 
-  if (current.pendingEvent) {
-    appendHint("先处理上方紧急事件，普通行动暂停。");
+  if (current.ai.status === "loading") {
+    appendHint("AI 正在生成事件，本回合先等它落笔。");
+  } else if (current.pendingEvent) {
+    appendHint("先处理上方事件，基础行动暂停。");
   } else if (current.phase === "ended") {
     appendHint("今天已经下班。开始新的一天可以继续挑战。");
   }
-}
-
-function appendHint(text) {
-  const hint = document.createElement("p");
-  hint.className = "muted";
-  hint.textContent = text;
-  elements.actionsPanel.appendChild(hint);
 }
 
 function renderLogs() {
@@ -300,7 +300,6 @@ function renderFakeTerminal() {
     "[info] scanning active workspace...\n" +
     "[info] resolving productivity graph...\n" +
     `[info] mode=${current.mode || "offline"}\n` +
-    "[info] current branch: feature/workday-simulation\n" +
     `[metric] performance_index=${performance}\n` +
     `[metric] context_risk=${risk}\n` +
     `[metric] budget_coins=${money}\n` +
@@ -308,25 +307,43 @@ function renderFakeTerminal() {
     "Press Esc to return.";
 }
 
+function appendHint(text) {
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent = text;
+  elements.actionsPanel.appendChild(hint);
+}
+
 function subtitleText(state) {
-  const mode = state.mode === "ai" ? "AI 模式" : "离线模式";
+  const mode = state.mode === "ai" ? "AI模式" : "离线模式";
   if (state.phase === "ready") {
-    return `${mode} · 藏在侧边栏里的文字打工游戏`;
+    return `${mode} · 文字工位模拟`;
   }
   if (state.phase === "ended") {
     return `${mode} · Day ${state.day} 已下班`;
   }
-  return `${mode} · Day ${state.day} 工位存活中`;
+  return `${mode} · Day ${state.day} 存活中`;
 }
 
 function actionMeta(action) {
-  const parts = [`${action.minutes} 分钟`];
+  const parts = [`${action.minutes}分钟`];
   if (action.cost) {
-    parts.push(`-${action.cost} 金币`);
+    parts.push(`-${action.cost}币`);
   }
   if (action.requires) {
     const requirements = Object.entries(action.requires).map(([key, value]) => `${statName(key)}>${value}`);
     parts.push(requirements.join(" "));
+  }
+  return parts.join(" · ");
+}
+
+function optionMeta(option) {
+  const parts = [];
+  if (option.minutes) {
+    parts.push(`${option.minutes}分钟`);
+  }
+  if (option.cost) {
+    parts.push(`-${option.cost}币`);
   }
   return parts.join(" · ");
 }
@@ -339,10 +356,10 @@ function actionTooltip(action) {
 function optionTooltip(option) {
   const parts = [];
   if (option.minutes) {
-    parts.push(`${option.minutes} 分钟`);
+    parts.push(`${option.minutes}分钟`);
   }
   if (option.cost) {
-    parts.push(`-${option.cost} 金币`);
+    parts.push(`-${option.cost}金币`);
   }
   const effects = effectsText(option.effects);
   if (effects) {

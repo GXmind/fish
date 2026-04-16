@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Language="en-US" Id="low-life-simulator" Version="0.1.0" Publisher="local" />
+    <Identity Language="en-US" Id="low-life-simulator" Version="0.2.0" Publisher="LifesimPress" />
     <DisplayName>低配人生：工位模拟器</DisplayName>
     <Description xml:space="preserve">A tiny workday text simulator hidden in the VS Code sidebar.</Description>
     <Tags>game,sidebar,text-game,simulator,workday</Tags>

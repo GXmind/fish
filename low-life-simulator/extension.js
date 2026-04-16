@@ -5,8 +5,8 @@ const {
   migrateState,
   startNewDay,
   setMode,
-  setAiTasks,
   setAiStatus,
+  queueAiScene,
   applyAction,
   resolvePendingEvent,
   formatTime,
@@ -48,6 +48,7 @@ class LowLifeProvider {
   async startDay() {
     this.state = startNewDay(this.state);
     await this.persistAndRender();
+    await this.maybeGenerateAiScene("开局");
   }
 
   async reset() {
@@ -113,6 +114,9 @@ class LowLifeProvider {
     if (message.type === "mode") {
       this.state = setMode(this.state, message.mode);
       await this.persistAndRender();
+      if (message.mode === "ai") {
+        await this.maybeGenerateAiScene("切换模式");
+      }
       return;
     }
 
@@ -122,13 +126,12 @@ class LowLifeProvider {
     }
 
     if (message.type === "resolveEvent") {
+      const before = this.state;
       this.state = resolvePendingEvent(this.state, message.optionId);
       await this.persistAndRender();
-      return;
-    }
-
-    if (message.type === "generateAiTasks") {
-      await this.generateAiTasks();
+      if (shouldRequestAiAfterResolve(before, this.state)) {
+        await this.maybeGenerateAiScene("事件结算");
+      }
       return;
     }
 
@@ -138,9 +141,7 @@ class LowLifeProvider {
   }
 
   async takeAction(actionId) {
-    const action =
-      ACTIONS.find((item) => item.id === actionId) ||
-      (this.state.ai.tasks || []).find((item) => item.id === actionId);
+    const action = ACTIONS.find((item) => item.id === actionId);
     if (!action) {
       return;
     }
@@ -149,41 +150,43 @@ class LowLifeProvider {
       this.state = startNewDay(this.state);
     }
 
+    const before = this.state;
     this.state = applyAction(this.state, action);
     await this.persistAndRender();
+
+    if (shouldRequestAiAfterAction(before, this.state)) {
+      await this.maybeGenerateAiScene(action.label);
+    }
   }
 
-  async generateAiTasks() {
-    this.state = setMode(this.state, "ai");
-    this.state = setAiStatus(this.state, "loading", "正在请求 MiniMax 生成任务...");
-    await this.persistAndRender();
-
-    const apiKey = await this.context.secrets.get(SECRET_KEY);
-    if (!apiKey) {
-      this.hasApiKey = false;
-      this.state = setAiStatus(this.state, "error", "还没有设置 MiniMax API Key。");
-      await this.persistAndRender();
-      vscode.window.showWarningMessage("请先设置 MiniMax API Key。", "设置").then((answer) => {
-        if (answer === "设置") {
-          this.setApiKey();
-        }
-      });
+  async maybeGenerateAiScene(trigger) {
+    if (!shouldRequestAiScene(this.state)) {
       return;
     }
 
-    this.hasApiKey = true;
+    const apiKey = await this.context.secrets.get(SECRET_KEY);
+    this.hasApiKey = Boolean(apiKey);
+
+    if (!apiKey) {
+      this.state = setAiStatus(this.state, "error", "AI 模式已开启，但还没有设置 MiniMax API Key。");
+      await this.persistAndRender();
+      return;
+    }
+
+    this.state = setAiStatus(this.state, "loading", "AI 正在根据当前状态生成事件...");
+    await this.persistAndRender();
 
     try {
-      const result = await requestMiniMaxTasks({
+      const scene = await requestMiniMaxScene({
         apiKey,
         state: this.state,
+        trigger,
         configuration: vscode.workspace.getConfiguration("lowLifeSimulator")
       });
-      this.state = setAiTasks(this.state, result.tasks, result.message);
+      this.state = queueAiScene(this.state, scene);
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
-      this.state = setAiStatus(this.state, "error", `AI 任务生成失败：${message}`);
-      vscode.window.showWarningMessage(`低配人生 AI 任务生成失败：${message}`);
+      this.state = setAiStatus(this.state, "error", `AI 事件生成失败：${message}`);
     }
 
     await this.persistAndRender();
@@ -237,7 +240,8 @@ class LowLifeProvider {
     }
 
     const mode = this.state.mode === "ai" ? "AI" : "离线";
-    this.statusBar.text = `$(briefcase) ${mode} ${formatTime(this.state.time)} 风险 ${this.state.stats.risk}%`;
+    const status = this.state.ai.status === "loading" ? " · 事件生成中" : "";
+    this.statusBar.text = `$(briefcase) ${mode} ${formatTime(this.state.time)} 风险 ${this.state.stats.risk}%${status}`;
     this.statusBar.tooltip = `绩效 ${this.state.stats.performance}，心情 ${this.state.stats.mood}，金币 ${this.state.stats.money}`;
     this.statusBar.show();
   }
@@ -247,7 +251,7 @@ class LowLifeProvider {
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "style.css"));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"));
     const cspSource = webview.cspSource;
-    const groupLabels = { work: "工作", slack: "摸鱼", rest: "补给", risky: "高风险", ai: "AI 任务" };
+    const groupLabels = { work: "工作", slack: "摸鱼", rest: "补给", risky: "高风险" };
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -275,8 +279,8 @@ class LowLifeProvider {
     </section>
 
     <section class="mode-panel">
-      <button id="offlineModeBtn" class="segmented">离线模式</button>
-      <button id="aiModeBtn" class="segmented">AI 模式</button>
+      <button id="offlineModeBtn">离线</button>
+      <button id="aiModeBtn">AI</button>
       <button id="setApiKeyBtn" class="ghost">API Key</button>
     </section>
 
@@ -288,24 +292,24 @@ class LowLifeProvider {
 
     <section id="statusTab" class="tab-view">
       <div class="panel stats" id="stats"></div>
+      <div class="panel ai-strip" id="aiStrip" hidden></div>
       <div class="panel warning-panel" id="pendingPanel" hidden></div>
       <div class="panel">
         <div id="eventTitle" class="event-title">事件</div>
         <p id="eventText" class="event-text"></p>
       </div>
-      <div class="panel" id="aiPanel" hidden></div>
       <div class="panel" id="summaryPanel" hidden></div>
       <div class="panel" id="actionsPanel"></div>
     </section>
 
     <section id="logsTab" class="tab-view" hidden>
-      <div class="panel">
+      <div class="panel compact-panel">
         <div id="logs" class="log-list"></div>
       </div>
     </section>
 
     <section id="achievementsTab" class="tab-view" hidden>
-      <div class="panel">
+      <div class="panel compact-panel">
         <div id="achievements" class="achievement-list"></div>
       </div>
     </section>
@@ -325,13 +329,13 @@ class LowLifeProvider {
   }
 }
 
-async function requestMiniMaxTasks({ apiKey, state, configuration }) {
+async function requestMiniMaxScene({ apiKey, state, trigger, configuration }) {
   const baseUrl = normalizeBaseUrl(configuration.get("minimaxBaseUrl") || "https://api.minimax.io/v1");
   const model = configuration.get("minimaxModel") || "MiniMax-M2.7-highspeed";
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -341,11 +345,11 @@ async function requestMiniMaxTasks({ apiKey, state, configuration }) {
         {
           role: "system",
           content:
-            "你是一个 VS Code 侧边栏文字游戏的任务导演。只返回 JSON，不要 Markdown。任务要幽默、短小、适合办公室摸鱼模拟器。"
+            "你是文字模拟器的回合导演。根据玩家当前数值，生成一个办公室随机事件和2到3个选项。只返回JSON，不要Markdown，不要解释。事件要短、具体、轻微幽默，且必须和当前数值风险相关。"
         },
         {
           role: "user",
-          content: buildAiPrompt(state)
+          content: buildAiPrompt(state, trigger)
         }
       ]
     })
@@ -361,51 +365,61 @@ async function requestMiniMaxTasks({ apiKey, state, configuration }) {
     ? data.choices[0].message.content
     : "";
   const parsed = parseJsonFromText(content);
-  if (!parsed || !Array.isArray(parsed.tasks)) {
-    throw new Error("MiniMax 返回内容不是任务 JSON。");
+  if (!parsed || !parsed.title || !parsed.text) {
+    throw new Error("MiniMax 返回内容不是事件 JSON。");
   }
 
-  return {
-    message: parsed.message || "MiniMax 已生成 3 个随机任务。",
-    tasks: parsed.tasks
-  };
+  return parsed;
 }
 
-function buildAiPrompt(state) {
-  const recentLogs = (state.logs || []).slice(-6).map((item) => `${item.time} ${item.title}: ${item.text}`);
+function buildAiPrompt(state, trigger) {
+  const recentLogs = (state.logs || []).slice(-5).map((item) => `${item.time} ${item.title}: ${item.text}`);
   return JSON.stringify({
-    request: "根据当前状态生成 3 个可执行任务。",
+    request: "生成一个状态驱动事件。",
+    trigger,
     output_schema: {
-      message: "一句总结",
-      tasks: [
+      title: "事件标题，12字以内",
+      text: "事件描述，40字以内",
+      message: "导演旁白，30字以内",
+      effects: {
+        energy: "可选，-15到15",
+        mood: "可选，-15到15",
+        performance: "可选，-15到15",
+        slack: "可选，-15到15",
+        risk: "可选，-15到15",
+        money: "可选，-20到20"
+      },
+      options: [
         {
-          label: "不超过 8 个汉字",
-          minutes: "15/30/45 之一",
+          label: "选项文案，10字以内",
+          minutes: "0/15/30之一",
           effects: {
-            energy: "数字 -30 到 30",
-            mood: "数字 -30 到 30",
-            performance: "数字 -30 到 30",
-            slack: "数字 -30 到 30",
-            risk: "数字 -30 到 30",
-            money: "数字 -30 到 30"
+            energy: "可选，-20到20",
+            mood: "可选，-20到20",
+            performance: "可选，-20到20",
+            slack: "可选，-20到20",
+            risk: "可选，-20到20",
+            money: "可选，-25到25"
           },
-          log: "不超过 40 个汉字的结果描述"
+          result: "选项结果，36字以内"
         }
       ]
     },
+    rules: [
+      "优先根据风险、精力、心情、金币、绩效生成贴合局势的事件。",
+      "如果风险高，事件更偏向暴露、问责、临时检查。",
+      "如果精力低，事件更偏向疲惫、误操作、强制恢复。",
+      "如果金币低，事件更偏向补给受限、额外赚钱机会。",
+      "选项必须有取舍，不要全是好事。",
+      "options 保持2到3个。"
+    ],
     current_state: {
       day: state.day,
+      mode: state.mode,
       time: formatTime(state.time),
       stats: state.stats,
-      pendingEvent: state.pendingEvent ? state.pendingEvent.title : null,
       recentLogs
-    },
-    rules: [
-      "任务必须有利弊，不要全是正收益。",
-      "风险高时给出稳住局面的任务。",
-      "金币低时可以给赚钱任务。",
-      "精力低时不要给高强度办公任务。"
-    ]
+    }
   });
 }
 
@@ -421,6 +435,31 @@ function parseJsonFromText(text) {
     }
   }
   return null;
+}
+
+function shouldRequestAiScene(state) {
+  return state.mode === "ai" && state.phase === "playing" && !state.pendingEvent && state.ai.status !== "loading";
+}
+
+function shouldRequestAiAfterAction(before, after) {
+  return (
+    after.mode === "ai" &&
+    after.phase === "playing" &&
+    !after.pendingEvent &&
+    after.counters.actions > before.counters.actions &&
+    after.time > before.time
+  );
+}
+
+function shouldRequestAiAfterResolve(before, after) {
+  return (
+    after.mode === "ai" &&
+    after.phase === "playing" &&
+    !after.pendingEvent &&
+    before.pendingEvent &&
+    before.pendingEvent.source === "emergency" &&
+    after.time >= before.time
+  );
 }
 
 function normalizeBaseUrl(value) {
@@ -444,8 +483,7 @@ function activate(context) {
     vscode.commands.registerCommand("lowLifeSimulator.startDay", () => provider.startDay()),
     vscode.commands.registerCommand("lowLifeSimulator.reset", () => provider.reset()),
     vscode.commands.registerCommand("lowLifeSimulator.setApiKey", () => provider.setApiKey()),
-    vscode.commands.registerCommand("lowLifeSimulator.clearApiKey", () => provider.clearApiKey()),
-    vscode.commands.registerCommand("lowLifeSimulator.generateAiTasks", () => provider.generateAiTasks())
+    vscode.commands.registerCommand("lowLifeSimulator.clearApiKey", () => provider.clearApiKey())
   );
 }
 

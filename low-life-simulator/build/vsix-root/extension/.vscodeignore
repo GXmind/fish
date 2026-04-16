@@ -4,3 +4,5 @@ node_modules/**
 *.vsix
 debug.log
 __pycache__/**
+build/**
+vsix/**

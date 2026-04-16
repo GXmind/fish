@@ -5,7 +5,7 @@ const WORK_END = 18 * 60;
 
 function createInitialState() {
   return {
-    version: 2,
+    version: 3,
     day: 0,
     phase: "ready",
     mode: "offline",
@@ -25,13 +25,13 @@ function createInitialState() {
       actions: 0,
       caught: 0,
       emergenciesResolved: 0,
-      aiTasksCompleted: 0
+      aiScenesResolved: 0
     },
     achievements: [],
     ai: {
       status: "idle",
       message: "",
-      tasks: []
+      lastSceneTitle: ""
     },
     pendingEvent: null,
     lastEvent: {
@@ -52,7 +52,7 @@ function migrateState(saved) {
   return {
     ...fresh,
     ...saved,
-    version: 2,
+    version: 3,
     stats: { ...fresh.stats, ...(saved.stats || {}) },
     counters: { ...fresh.counters, ...(saved.counters || {}) },
     ai: { ...fresh.ai, ...(saved.ai || {}) },
@@ -88,24 +88,10 @@ function startNewDay(previous) {
 function setMode(state, mode) {
   const next = migrateState(state);
   next.mode = mode === "ai" ? "ai" : "offline";
-  if (next.mode === "offline") {
-    next.ai.status = "idle";
-    next.ai.message = "";
-    next.ai.tasks = [];
-  }
+  next.ai.status = "idle";
+  next.ai.message = next.mode === "ai" ? "AI 将在每回合后自动生成随机事件。" : "当前使用本地事件池。";
   addLog(next, next.mode === "ai" ? "已切换到 AI 模式。" : "已切换到离线模式。", "模式切换");
   unlockAchievements(next);
-  return next;
-}
-
-function setAiTasks(state, tasks, message = "") {
-  const next = migrateState(state);
-  next.ai = {
-    status: "ready",
-    message: message || "AI 已根据当前状态生成任务。",
-    tasks: sanitizeAiTasks(tasks)
-  };
-  addLog(next, next.ai.message, "AI 任务");
   return next;
 }
 
@@ -116,6 +102,37 @@ function setAiStatus(state, status, message) {
   return next;
 }
 
+function queueAiScene(state, scene) {
+  const next = migrateState(state);
+  next.ai.status = "ready";
+  next.ai.message = scene.message || "AI 已接管本回合事件。";
+  next.ai.lastSceneTitle = scene.title || "";
+
+  if (scene.effects) {
+    applyEffects(next.stats, scene.effects);
+  }
+
+  if (scene.options && scene.options.length) {
+    setPendingEvent(next, {
+      id: `ai_${Date.now()}`,
+      source: "ai",
+      title: scene.title,
+      text: scene.text,
+      options: scene.options
+    });
+  } else {
+    next.lastEvent = {
+      title: scene.title || "AI 事件",
+      text: scene.text || "AI 给你安排了一点新状况。"
+    };
+    addLog(next, next.lastEvent.text, next.lastEvent.title);
+  }
+
+  unlockAchievements(next);
+  maybeFinishDay(next);
+  return next;
+}
+
 function applyAction(state, action) {
   const migrated = migrateState(state);
   if (migrated.phase !== "playing") {
@@ -123,7 +140,7 @@ function applyAction(state, action) {
   }
 
   if (migrated.pendingEvent) {
-    return withBlockedMessage(migrated, "先处理紧急事件", "当前有紧急事件未解决，普通行动已暂停。");
+    return withBlockedMessage(migrated, "先处理事件", "当前有未处理事件，普通行动已暂停。");
   }
 
   const blocked = getActionBlock(migrated, action);
@@ -138,11 +155,12 @@ function applyAction(state, action) {
   const next = cloneState(migrated);
   next.summary = null;
   next.counters.actions += 1;
+  next.ai.status = next.mode === "ai" ? "idle" : next.ai.status;
   bumpCounters(next, action);
 
   applyEffects(next.stats, action.effects);
   advanceTime(next, action.minutes);
-  addLog(next, action.log, action.source === "ai" ? "AI 任务" : "行动");
+  addLog(next, action.log, "行动");
 
   const emergency = findEmergency(next);
   if (emergency) {
@@ -151,21 +169,23 @@ function applyAction(state, action) {
     return next;
   }
 
-  const event = rollEvent(next, action);
-  if (event) {
-    applyEffects(next.stats, event.effects || {});
-    next.lastEvent = { title: event.title, text: event.text };
-    addLog(next, event.text, event.title);
+  if (next.mode !== "ai") {
+    const event = rollEvent(next, action);
+    if (event) {
+      applyEffects(next.stats, event.effects || {});
+      next.lastEvent = { title: event.title, text: event.text };
+      addLog(next, event.text, event.title);
+    } else {
+      next.lastEvent = {
+        title: "平稳推进",
+        text: "没有突发状况。办公室暂时维持表面和平。"
+      };
+    }
   } else {
     next.lastEvent = {
-      title: "平稳推进",
-      text: "没有突发状况。办公室暂时维持表面和平。"
+      title: "等待 AI 剧情",
+      text: "你完成了这个回合，AI 正准备下一段办公室剧情。"
     };
-  }
-
-  if (action.source === "ai") {
-    next.counters.aiTasksCompleted += 1;
-    next.ai.tasks = (next.ai.tasks || []).filter((task) => task.id !== action.id);
   }
 
   unlockAchievements(next);
@@ -179,7 +199,7 @@ function resolvePendingEvent(state, optionId) {
     return migrated;
   }
 
-  const option = migrated.pendingEvent.options.find((item) => item.id === optionId);
+  const option = (migrated.pendingEvent.options || []).find((item) => item.id === optionId);
   if (!option) {
     return migrated;
   }
@@ -189,16 +209,23 @@ function resolvePendingEvent(state, optionId) {
     return blocked;
   }
 
+  const source = migrated.pendingEvent.source || "event";
   const next = cloneState(migrated);
   next.pendingEvent = null;
-  next.counters.emergenciesResolved += 1;
+  if (source === "emergency") {
+    next.counters.emergenciesResolved += 1;
+  }
+  if (source === "ai") {
+    next.counters.aiScenesResolved += 1;
+  }
+
   applyEffects(next.stats, option.effects || {});
   advanceTime(next, option.minutes || 0);
   next.lastEvent = {
-    title: "紧急事件处理完成",
-    text: option.result || "你处理了眼前的麻烦。"
+    title: "事件处理完成",
+    text: option.result || "你处理了眼前的情况。"
   };
-  addLog(next, option.result || "你处理了眼前的麻烦。", "紧急事件");
+  addLog(next, next.lastEvent.text, source === "ai" ? "AI 事件" : "事件处理");
 
   const chained = findEmergency(next);
   if (chained) {
@@ -281,6 +308,7 @@ function applyCaughtEvent(state, action) {
   if (next.stats.risk >= 70 || next.stats.performance <= 10) {
     setPendingEvent(next, {
       id: "caught_followup",
+      source: "emergency",
       title: "紧急事件：被要求说明情况",
       text: "刚才的抓包还没完全过去，你需要选择一种方式稳住局面。",
       options: [
@@ -318,9 +346,10 @@ function findEmergency(state) {
 function setPendingEvent(state, event) {
   state.pendingEvent = {
     id: event.id,
+    source: event.source || "emergency",
     title: event.title,
     text: event.text,
-    options: event.options.map((option) => ({
+    options: (event.options || []).map((option) => ({
       id: option.id,
       label: option.label,
       minutes: option.minutes || 0,
@@ -338,7 +367,6 @@ function shouldBeCaught(state, action) {
   if (state.stats.risk >= 85) {
     return true;
   }
-
   const base = action.group === "risky" ? 0.35 : 0.18;
   const riskBonus = Math.max(0, state.stats.risk - 60) / 100;
   return Math.random() < base + riskBonus;
@@ -475,38 +503,6 @@ function statMax(key) {
   return stat ? stat.max : 100;
 }
 
-function sanitizeAiTasks(tasks) {
-  if (!Array.isArray(tasks)) {
-    return [];
-  }
-
-  return tasks.slice(0, 3).map((task, index) => ({
-    id: `ai_${Date.now()}_${index}`,
-    source: "ai",
-    group: "ai",
-    label: clampText(task.label || `AI 任务 ${index + 1}`, 18),
-    minutes: clamp(Number(task.minutes || 15), 15, 45),
-    effects: sanitizeEffects(task.effects),
-    log: clampText(task.log || task.description || "AI 给你安排了一个随机任务。", 80)
-  }));
-}
-
-function sanitizeEffects(effects) {
-  const result = {};
-  const allowed = new Set(STATS.map((item) => item.key));
-  for (const [key, value] of Object.entries(effects || {})) {
-    if (allowed.has(key)) {
-      result[key] = clamp(Number(value || 0), -30, 30);
-    }
-  }
-  return result;
-}
-
-function clampText(text, maxLength) {
-  const value = String(text).replace(/\s+/g, " ").trim();
-  return value.length > maxLength ? value.slice(0, maxLength) : value;
-}
-
 function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
 }
@@ -520,8 +516,8 @@ module.exports = {
   migrateState,
   startNewDay,
   setMode,
-  setAiTasks,
   setAiStatus,
+  queueAiScene,
   applyAction,
   resolvePendingEvent,
   formatTime,

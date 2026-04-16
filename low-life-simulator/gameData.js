@@ -241,7 +241,7 @@ const ACHIEVEMENTS = [
   { id: "coin_keeper", title: "金币守门员", test: (s) => s.phase === "ended" && s.stats.money >= 140 },
   { id: "crisis_manager", title: "危机处理专员", test: (s) => s.counters.emergenciesResolved >= 3 },
   { id: "caught_once", title: "公开处刑体验卡", test: (s) => s.counters.caught >= 1 },
-  { id: "ai_colleague", title: "AI 同事上线", test: (s) => s.mode === "ai" && s.counters.aiTasksCompleted >= 1 }
+  { id: "ai_colleague", title: "AI 同事上线", test: (s) => s.mode === "ai" && s.counters.aiScenesResolved >= 1 }
 ];
 
 module.exports = { STATS, ACTIONS, EVENTS, EMERGENCY_EVENTS, ACHIEVEMENTS };

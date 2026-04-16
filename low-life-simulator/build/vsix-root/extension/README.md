@@ -1,4 +1,4 @@
-# 低配人生：工位模拟器
+﻿# 低配人生：工位模拟器
 
 一个藏在 VS Code 侧边栏里的文字打工游戏。玩家通过选择写代码、改 Bug、开会、摸鱼、喝咖啡等行动，在精力、心情、绩效、摸鱼值、风险和金币之间找平衡，努力活到下班。
 
@@ -7,7 +7,7 @@
 - VS Code Activity Bar 独立入口
 - 从 09:30 到 18:00 的单日循环
 - 离线模式：不联网，使用本地规则与事件池
-- AI 模式：通过 MiniMax OpenAI-compatible API 生成随机任务
+- AI 模式：通过 MiniMax OpenAI-compatible API 在每个回合后自动生成状态驱动事件与选项
 - 金币经济：工作、奖励、罚款、补给消耗和日终结算
 - 紧急事件：精力、心情、绩效、风险、金币触底或爆表时触发选项
 - 高风险娱乐抓包：风险过高时摸鱼会被抓并扣金币
@@ -23,7 +23,7 @@ Base URL: https://api.minimax.io/v1
 Model: MiniMax-M2.7-highspeed
 ```
 
-中国用户可以在 VS Code 设置里把 `lowLifeSimulator.minimaxBaseUrl` 改为：
+国内用户可以在 VS Code 设置里把 `lowLifeSimulator.minimaxBaseUrl` 改为：
 
 ```txt
 https://api.minimaxi.com/v1
@@ -45,7 +45,6 @@ API Key 不写入项目文件。运行命令 `低配人生: 设置 MiniMax API K
 - `低配人生: 重置存档`
 - `低配人生: 设置 MiniMax API Key`
 - `低配人生: 清除 MiniMax API Key`
-- `低配人生: 生成 AI 任务`
 
 ## 开发检查
 

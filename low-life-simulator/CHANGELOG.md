@@ -10,3 +10,13 @@
 - Added offline/AI mode switching.
 - Added MiniMax-powered random task generation.
 - Added coin economy, low-stat emergency events, emergency choices, and high-risk entertainment penalties.
+
+## 0.2.0
+
+- Switched AI mode from manual task generation to automatic state-driven scene generation.
+- Tightened the sidebar UI density and reduced card/button sizing.
+
+## 0.3.0
+
+- Repackaged for Marketplace upload with updated publisher metadata and README wording.
+- Kept the official `vsce` packaging flow as the release source of truth.

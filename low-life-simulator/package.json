@@ -1,0 +1,83 @@
+{
+  "name": "low-life-simulator",
+  "displayName": "低配人生：工位模拟器",
+  "description": "A tiny workday text simulator hidden in the VS Code sidebar.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Fun",
+    "Other"
+  ],
+  "keywords": [
+    "game",
+    "sidebar",
+    "text-game",
+    "simulator",
+    "workday"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onView:lowLifeSimulator.sidebar",
+    "onCommand:lowLifeSimulator.open",
+    "onCommand:lowLifeSimulator.startDay",
+    "onCommand:lowLifeSimulator.reset"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "lowLifeSimulator.open",
+        "title": "低配人生: 打开侧边栏"
+      },
+      {
+        "command": "lowLifeSimulator.startDay",
+        "title": "低配人生: 开始新的一天"
+      },
+      {
+        "command": "lowLifeSimulator.reset",
+        "title": "低配人生: 重置存档"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lowLifeSimulator",
+          "title": "低配人生",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lowLifeSimulator": [
+        {
+          "id": "lowLifeSimulator.sidebar",
+          "name": "工位模拟器",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "lowLifeSimulator.startDay",
+          "when": "view == lowLifeSimulator.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "lowLifeSimulator.reset",
+          "when": "view == lowLifeSimulator.sidebar",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}

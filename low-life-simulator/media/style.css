@@ -1,0 +1,252 @@
+:root {
+  color-scheme: light dark;
+  --gap: 10px;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 12px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  line-height: 1.45;
+}
+
+button {
+  min-height: 30px;
+  padding: 6px 8px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+button.ghost {
+  color: var(--vscode-foreground);
+  background: transparent;
+  border-color: var(--vscode-panel-border);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.shell {
+  display: grid;
+  gap: var(--gap);
+}
+
+.topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap);
+}
+
+.title {
+  min-width: 0;
+}
+
+.title h1 {
+  margin: 0 0 2px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.muted {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.clock {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar,
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tabs button {
+  flex: 1 1 64px;
+}
+
+.tabs button.active {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.panel {
+  margin-top: var(--gap);
+  padding: 10px;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--radius);
+}
+
+.stats {
+  display: grid;
+  gap: 8px;
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: 42px 1fr 34px;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.bar {
+  height: 8px;
+  overflow: hidden;
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+}
+
+.bar > span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--vscode-charts-blue);
+  transition: width 120ms ease-out;
+}
+
+.stat-row.risk .bar > span {
+  background: var(--vscode-charts-red);
+}
+
+.stat-row.mood .bar > span {
+  background: var(--vscode-charts-green);
+}
+
+.stat-row.slack .bar > span {
+  background: var(--vscode-charts-yellow);
+}
+
+.event-title,
+.group-title {
+  margin: 0 0 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.event-text {
+  margin: 0;
+  word-break: break-word;
+}
+
+.group {
+  display: grid;
+  gap: 6px;
+}
+
+.group + .group {
+  margin-top: 10px;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.action-grid button {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+}
+
+.log-list {
+  display: grid;
+  max-height: 520px;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.log-item {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.log-item:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.log-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.achievement-list {
+  display: grid;
+  gap: 6px;
+}
+
+.achievement {
+  padding: 8px;
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+}
+
+.empty {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.fake-terminal {
+  display: none;
+  min-height: 420px;
+  padding: 10px;
+  color: var(--vscode-terminal-ansiGreen);
+  background: var(--vscode-terminal-background, #111);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--radius);
+  font-family: var(--vscode-editor-font-family);
+  white-space: pre-wrap;
+}
+
+body.disguise .shell {
+  display: none;
+}
+
+body.disguise .fake-terminal {
+  display: block;
+}

@@ -1,0 +1,6 @@
+.git/**
+.vscode/**
+node_modules/**
+*.vsix
+debug.log
+__pycache__/**
